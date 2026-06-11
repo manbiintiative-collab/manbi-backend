@@ -6,6 +6,7 @@ require('dotenv').config();
 
 const app = express();
 
+// ── SECURITY ──
 app.use(helmet());
 app.use(cors({
   origin: [
@@ -18,21 +19,29 @@ app.use(cors({
   credentials: true
 }));
 
-const limiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });
+// ── RATE LIMITING ──
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100
+});
 app.use('/api/', limiter);
 
+// ── BODY PARSING ──
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// ── ROUTES ──
 app.use('/api/auth',  require('./src/routes/auth'));
 app.use('/api/loans', require('./src/routes/loans'));
 app.use('/api/users', require('./src/routes/users'));
 app.use('/api/admin', require('./src/routes/admin'));
 
+// ── HEALTH CHECK ──
 app.get('/', (req, res) => {
   res.json({ status: 'Manbi API is running', version: '1.0.0' });
 });
 
+// ── ERROR HANDLER ──
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({ error: 'Something went wrong on our end.' });
