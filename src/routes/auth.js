@@ -171,8 +171,6 @@ router.get('/me', async (req, res) => {
   }
 });
 
-module.exports = router;
-
 // ── GOOGLE OAUTH ──
 router.post('/google', async (req, res) => {
   const { google_id, email, fname, lname, avatar } = req.body;
@@ -226,3 +224,5 @@ router.post('/google', async (req, res) => {
     res.status(500).json({ error: 'Google sign-in failed. Please try again.' });
   }
 });
+
+module.exports = router;
