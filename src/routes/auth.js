@@ -2,7 +2,10 @@ const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
+const { OAuth2Client } = require('google-auth-library');
 const db = require('../db');
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // ── VALIDATION RULES ──
 const registerRules = [
@@ -173,17 +176,34 @@ router.get('/me', async (req, res) => {
 
 // ── GOOGLE OAUTH ──
 router.post('/google', async (req, res) => {
-  const { google_id, email, fname, lname, avatar } = req.body;
+  const { credential } = req.body;
 
-  if (!google_id || !email) {
-    return res.status(400).json({ error: 'Invalid Google credentials.' });
+  if (!credential) {
+    return res.status(400).json({ error: 'Missing Google credential.' });
   }
 
   try {
+    // Verify the token directly with Google — never trust raw fields from the client
+    const ticket = await googleClient.verifyIdToken({
+      idToken: credential,
+      audience: process.env.GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+
+    const google_id = payload.sub;
+    const email = (payload.email || '').toLowerCase();
+    const fname = payload.given_name || 'Friend';
+    const lname = payload.family_name || '';
+    const avatar = '🌱';
+
+    if (!email) {
+      return res.status(400).json({ error: 'Your Google account has no email address.' });
+    }
+
     // Check if user already exists
     const existing = await db.query(
       'SELECT * FROM lenders WHERE email = $1',
-      [email.toLowerCase()]
+      [email]
     );
 
     let lender;
@@ -192,14 +212,20 @@ router.post('/google', async (req, res) => {
     if (existing.rows.length > 0) {
       // Existing user — log them in
       lender = existing.rows[0];
+
+      // Link their Google account if not already linked
+      if (!lender.google_id) {
+        await db.query('UPDATE lenders SET google_id = $1 WHERE id = $2', [google_id, lender.id]);
+        lender.google_id = google_id;
+      }
     } else {
       // New user — create account
       isNew = true;
       const result = await db.query(
         `INSERT INTO lenders (fname, lname, email, password_hash, momo_number, momo_network, level, vault_balance, avatar, google_id)
          VALUES ($1, $2, $3, $4, NULL, 'MTN', 'Seed Sower', 0, $5, $6)
-         RETURNING id, fname, lname, email, momo_number, level, vault_balance, avatar, squad, created_at`,
-        [fname, lname || '', email.toLowerCase(), 'GOOGLE_AUTH', avatar || '🌱', google_id]
+         RETURNING id, fname, lname, email, momo_number, momo_network, level, vault_balance, avatar, squad, created_at, google_id`,
+        [fname, lname, email, 'GOOGLE_AUTH', avatar, google_id]
       );
       lender = result.rows[0];
     }
