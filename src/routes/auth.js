@@ -11,12 +11,18 @@ const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const registerRules = [
   body('fname').trim().notEmpty().withMessage('First name is required').isLength({ max: 100 }),
   body('lname').trim().notEmpty().withMessage('Last name is required').isLength({ max: 100 }),
-  body('email').trim().isEmail().normalizeEmail().withMessage('Valid email is required'),
+body('email').trim().isEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 8 }).withMessage('Password must be at least 8 characters'),
-  body('momo').optional().trim().isLength({ max: 20 }),
-  body('network').optional().isIn(['MTN', 'Telecel', 'AirtelTigo']),
+  body('momo').optional().trim().isLength({ max: 20 }).withMessage('Momo number is invalid'),
+  body('network').optional().custom((value) => {
+    if (!value) return true;
+    const validNetworks = ['mtn', 'telecel', 'airteltigo'];
+    if (!validNetworks.includes(value.toLowerCase())) {
+      throw new Error('Please select a valid network provider');
+    }
+return true;
+  })
 ];
-
 const loginRules = [
   body('email').trim().isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('password').notEmpty().withMessage('Password is required'),
