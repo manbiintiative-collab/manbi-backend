@@ -20,7 +20,8 @@ router.post('/loans', requireAdmin, async (req, res) => {
     entrepreneur_name, initials, location, sector,
     purpose, goal_amount, loan_term_months, repayment_plan,
     narrative, profile_photo_url, video_url,
-    partner_name, partner_description, partner_logo_url, partner_contact
+    partner_name, partner_description, partner_logo_url, partner_contact,
+    featured
   } = req.body;
 
   if (!entrepreneur_name || !location || !sector || !purpose || !goal_amount) {
@@ -28,14 +29,19 @@ router.post('/loans', requireAdmin, async (req, res) => {
   }
 
   try {
+    // If featuring this loan, unfeature all others first
+    if (featured) {
+      await db.query('UPDATE loans SET featured = FALSE WHERE featured = TRUE');
+    }
+
     const result = await db.query(
       `INSERT INTO loans (
         entrepreneur_name, initials, location, sector,
         purpose, goal_amount, loan_term_months, repayment_plan,
         narrative, profile_photo_url, video_url,
         partner_name, partner_description, partner_logo_url, partner_contact,
-        status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'active')
+        featured, status
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'active')
       RETURNING *`,
       [
         entrepreneur_name, initials || entrepreneur_name.substring(0,2).toUpperCase(),
@@ -43,7 +49,8 @@ router.post('/loans', requireAdmin, async (req, res) => {
         loan_term_months || 6, repayment_plan, narrative,
         profile_photo_url, video_url,
         partner_name || null, partner_description || null,
-        partner_logo_url || null, partner_contact || null
+        partner_logo_url || null, partner_contact || null,
+        featured || false
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -53,7 +60,32 @@ router.post('/loans', requireAdmin, async (req, res) => {
   }
 });
 
-// ── GET LOAN FUNDERS ──
+// ── GET FEATURED LOAN ──
+router.get('/featured', async (req, res) => {
+  try {
+    const result = await db.query(
+      "SELECT * FROM loans WHERE featured = TRUE AND status = 'active' LIMIT 1"
+    );
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch featured loan.' });
+  }
+});
+
+// ── FEATURE AN EXISTING LOAN ──
+router.patch('/loans/:id/feature', requireAdmin, async (req, res) => {
+  try {
+    await db.query('UPDATE loans SET featured = FALSE WHERE featured = TRUE');
+    const result = await db.query(
+      'UPDATE loans SET featured = TRUE WHERE id = $1 RETURNING *',
+      [req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Loan not found.' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to feature loan.' });
+  }
+});
 router.get('/loans/:id/funders', async (req, res) => {
   try {
     const result = await db.query(
