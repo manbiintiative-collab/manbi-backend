@@ -14,6 +14,33 @@ router.get('/applications', requireAdmin, async (req, res) => {
   }
 });
 
+// ── GET ALL LOANS (ANY STATUS) — FOR ADMIN PANEL ──
+router.get('/loans', requireAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT l.*,
+        COALESCE(SUM(f.amount), 0) as raised,
+        ROUND((COALESCE(SUM(f.amount), 0) / l.goal_amount * 100)::numeric, 0) as pct_funded
+       FROM loans l
+       LEFT JOIN funding f ON f.loan_id = l.id
+       GROUP BY l.id
+       ORDER BY
+         CASE l.status
+           WHEN 'funded' THEN 1
+           WHEN 'active' THEN 2
+           WHEN 'disbursed' THEN 3
+           WHEN 'repaid' THEN 4
+           WHEN 'closed' THEN 5
+         END,
+         l.created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get all admin loans error:', err);
+    res.status(500).json({ error: 'Failed to fetch loans.' });
+  }
+});
+
 // ── CREATE LOAN LISTING (approve entrepreneur) ──
 router.post('/loans', requireAdmin, async (req, res) => {
   const {
