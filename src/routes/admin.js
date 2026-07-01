@@ -253,14 +253,54 @@ router.get('/loans/:id/repayments', requireAdmin, async (req, res) => {
 // ── MARK REPAYMENT AS PAID ──
 router.patch('/repayments/:id/paid', requireAdmin, async (req, res) => {
   try {
+    // Mark installment as paid
     const result = await db.query(
       "UPDATE repayments SET status = 'paid', paid_at = NOW() WHERE id = $1 RETURNING *",
       [req.params.id]
     );
     if (!result.rows[0]) return res.status(404).json({ error: 'Repayment not found.' });
 
+    const repayment = result.rows[0];
+    const loanId = repayment.loan_id;
+    const installmentAmount = parseFloat(repayment.amount);
+
+    // Only credit vaults if installment amount > 0 (agricultural grace months = 0)
+    if (installmentAmount > 0) {
+      // Get total loan amount and all lenders who funded this loan
+      const loanResult = await db.query(
+        'SELECT goal_amount FROM loans WHERE id = $1',
+        [loanId]
+      );
+      const goalAmount = parseFloat(loanResult.rows[0].goal_amount);
+
+      const fundersResult = await db.query(
+        `SELECT lender_id, SUM(amount) as contributed
+         FROM funding
+         WHERE loan_id = $1
+         GROUP BY lender_id`,
+        [loanId]
+      );
+
+      // Credit each lender's vault proportionally
+      for (const funder of fundersResult.rows) {
+        const proportion = parseFloat(funder.contributed) / goalAmount;
+        const share = parseFloat((installmentAmount * proportion).toFixed(2));
+        if (share > 0) {
+          await db.query(
+            'UPDATE lenders SET vault_balance = COALESCE(vault_balance, 0) + $1 WHERE id = $2',
+            [share, funder.lender_id]
+          );
+          // Log the transaction
+          await db.query(
+            `INSERT INTO transactions (lender_id, type, amount, payment_method, status, created_at)
+             VALUES ($1, 'repayment_credit', $2, 'vault', 'completed', NOW())`,
+            [funder.lender_id, share]
+          );
+        }
+      }
+    }
+
     // Check if all repayments for this loan are paid — if so mark loan repaid
-    const loanId = result.rows[0].loan_id;
     const check = await db.query(
       "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid FROM repayments WHERE loan_id = $1",
       [loanId]
@@ -270,8 +310,14 @@ router.patch('/repayments/:id/paid', requireAdmin, async (req, res) => {
       await db.query("UPDATE loans SET status = 'repaid' WHERE id = $1", [loanId]);
     }
 
-    res.json(result.rows[0]);
+    res.json({
+      repayment: result.rows[0],
+      message: installmentAmount > 0
+        ? 'Repayment marked as paid. Lender vaults credited.'
+        : 'Grace period installment marked. No vault credits issued.'
+    });
   } catch (err) {
+    console.error('Mark repayment paid error:', err);
     res.status(500).json({ error: 'Failed to mark repayment as paid.' });
   }
 });
