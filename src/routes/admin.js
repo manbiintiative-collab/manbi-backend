@@ -48,7 +48,7 @@ router.post('/loans', requireAdmin, async (req, res) => {
     purpose, goal_amount, loan_term_months, repayment_plan,
     narrative, profile_photo_url, video_url,
     partner_name, partner_description, partner_logo_url, partner_contact,
-    featured
+    featured, repayment_track
   } = req.body;
 
   if (!entrepreneur_name || !location || !sector || !purpose || !goal_amount) {
@@ -67,8 +67,8 @@ router.post('/loans', requireAdmin, async (req, res) => {
         purpose, goal_amount, loan_term_months, repayment_plan,
         narrative, profile_photo_url, video_url,
         partner_name, partner_description, partner_logo_url, partner_contact,
-        featured, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'active')
+        featured, repayment_track, status
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'active')
       RETURNING *`,
       [
         entrepreneur_name, initials || entrepreneur_name.substring(0,2).toUpperCase(),
@@ -77,7 +77,7 @@ router.post('/loans', requireAdmin, async (req, res) => {
         profile_photo_url, video_url,
         partner_name || null, partner_description || null,
         partner_logo_url || null, partner_contact || null,
-        featured || false
+        featured || false, repayment_track || 'standard'
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -120,7 +120,8 @@ router.get('/loans/:id/funders', async (req, res) => {
         f.amount,
         f.anonymous,
         f.created_at,
-        l.full_name,
+        l.fname,
+        l.lname,
         l.profile_photo_url
        FROM funding f
        JOIN lenders l ON f.lender_id = l.id
@@ -135,7 +136,7 @@ router.get('/loans/:id/funders', async (req, res) => {
       return {
         amount: r.amount,
         anonymous: false,
-        full_name: r.full_name,
+        full_name: (r.fname || '') + ' ' + (r.lname || ''),
         profile_photo_url: r.profile_photo_url || null,
         created_at: r.created_at
       };
@@ -144,6 +145,134 @@ router.get('/loans/:id/funders', async (req, res) => {
   } catch (err) {
     console.error('Funders error:', err);
     res.status(500).json({ error: 'Failed to fetch funders.' });
+  }
+});
+
+// ── GET ALL LENDERS ──
+router.get('/lenders', requireAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT
+        l.id, l.fname, l.lname, l.email, l.momo_number, l.momo_network,
+        l.vault_balance, l.level, l.role, l.created_at, l.profile_photo_url,
+        COUNT(DISTINCT f.loan_id) as loans_funded,
+        COALESCE(SUM(f.amount), 0) as total_funded
+       FROM lenders l
+       LEFT JOIN funding f ON f.lender_id = l.id
+       GROUP BY l.id
+       ORDER BY l.created_at DESC`
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get lenders error:', err);
+    res.status(500).json({ error: 'Failed to fetch lenders.' });
+  }
+});
+
+// ── GENERATE REPAYMENT SCHEDULE ──
+router.post('/loans/:id/repayment-schedule', requireAdmin, async (req, res) => {
+  const { disbursed_at } = req.body;
+  const loanId = req.params.id;
+  try {
+    const loanResult = await db.query('SELECT * FROM loans WHERE id = $1', [loanId]);
+    if (!loanResult.rows[0]) return res.status(404).json({ error: 'Loan not found.' });
+    const loan = loanResult.rows[0];
+    const track = loan.repayment_track || 'standard';
+    const term = parseInt(loan.loan_term_months) || 6;
+    const goal = parseFloat(loan.goal_amount);
+    const startDate = disbursed_at ? new Date(disbursed_at) : new Date();
+
+    // Delete any existing schedule for this loan
+    await db.query('DELETE FROM repayments WHERE loan_id = $1', [loanId]);
+
+    const schedule = [];
+    if (track === 'agricultural') {
+      // Grace period for first 2/3 of term, repayments in last 1/3
+      const gracePeriod = Math.floor(term * 0.6);
+      const repaymentMonths = term - gracePeriod;
+      const installment = parseFloat((goal / repaymentMonths).toFixed(2));
+      for (let i = 1; i <= term; i++) {
+        const dueDate = new Date(startDate);
+        dueDate.setMonth(dueDate.getMonth() + i);
+        schedule.push({
+          installment_number: i,
+          due_date: dueDate.toISOString().split('T')[0],
+          amount: i <= gracePeriod ? 0 : installment,
+          status: 'pending'
+        });
+      }
+    } else {
+      // Standard — equal monthly installments
+      const installment = parseFloat((goal / term).toFixed(2));
+      for (let i = 1; i <= term; i++) {
+        const dueDate = new Date(startDate);
+        dueDate.setMonth(dueDate.getMonth() + i);
+        schedule.push({
+          installment_number: i,
+          due_date: dueDate.toISOString().split('T')[0],
+          amount: installment,
+          status: 'pending'
+        });
+      }
+    }
+
+    // Insert all installments
+    for (const s of schedule) {
+      await db.query(
+        'INSERT INTO repayments (loan_id, installment_number, due_date, amount, status) VALUES ($1,$2,$3,$4,$5)',
+        [loanId, s.installment_number, s.due_date, s.amount, s.status]
+      );
+    }
+
+    // Mark loan as disbursed
+    await db.query(
+      "UPDATE loans SET status = 'disbursed', disbursed_at = $1 WHERE id = $2",
+      [startDate.toISOString(), loanId]
+    );
+
+    res.json({ message: 'Repayment schedule generated.', schedule });
+  } catch (err) {
+    console.error('Repayment schedule error:', err);
+    res.status(500).json({ error: 'Failed to generate repayment schedule.' });
+  }
+});
+
+// ── GET REPAYMENT SCHEDULE FOR A LOAN ──
+router.get('/loans/:id/repayments', requireAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      'SELECT * FROM repayments WHERE loan_id = $1 ORDER BY installment_number ASC',
+      [req.params.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch repayments.' });
+  }
+});
+
+// ── MARK REPAYMENT AS PAID ──
+router.patch('/repayments/:id/paid', requireAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      "UPDATE repayments SET status = 'paid', paid_at = NOW() WHERE id = $1 RETURNING *",
+      [req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Repayment not found.' });
+
+    // Check if all repayments for this loan are paid — if so mark loan repaid
+    const loanId = result.rows[0].loan_id;
+    const check = await db.query(
+      "SELECT COUNT(*) as total, SUM(CASE WHEN status = 'paid' THEN 1 ELSE 0 END) as paid FROM repayments WHERE loan_id = $1",
+      [loanId]
+    );
+    const { total, paid } = check.rows[0];
+    if (parseInt(paid) >= parseInt(total)) {
+      await db.query("UPDATE loans SET status = 'repaid' WHERE id = $1", [loanId]);
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to mark repayment as paid.' });
   }
 });
 
@@ -159,7 +288,7 @@ router.patch('/loans/:id', requireAdmin, async (req, res) => {
       'UPDATE loans SET status = $1 WHERE id = $2 RETURNING *',
       [status, req.params.id]
     );
-    res.json(result.rows[0]);
+    res.json({ ...result.rows[0], needs_schedule: status === 'disbursed' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update loan.' });
   }
