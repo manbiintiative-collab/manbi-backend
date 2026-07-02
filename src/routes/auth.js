@@ -1,11 +1,14 @@
 const router = require('express').Router();
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { body, validationResult } = require('express-validator');
 const { OAuth2Client } = require('google-auth-library');
+const { Resend } = require('resend');
 const db = require('../db');
 
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // ── VALIDATION RULES ──
 const registerRules = [
@@ -254,6 +257,143 @@ router.post('/google', async (req, res) => {
   } catch (err) {
     console.error('Google auth error:', err.message);
     res.status(500).json({ error: 'Google sign-in failed. Please try again.' });
+  }
+});
+
+// ── FORGOT PASSWORD ──
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email is required.' });
+
+  try {
+    const result = await db.query(
+      'SELECT id, fname FROM lenders WHERE email = $1',
+      [email.toLowerCase().trim()]
+    );
+
+    // Always return success to prevent user enumeration
+    if (result.rows.length === 0) {
+      return res.json({ message: 'If an account exists with this email, a reset link has been sent.' });
+    }
+
+    const lender = result.rows[0];
+
+    // Generate secure random token
+    const token = crypto.randomBytes(32).toString('hex');
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    // Invalidate any existing reset tokens for this user
+    await db.query(
+      'UPDATE password_resets SET used = TRUE WHERE lender_id = $1 AND used = FALSE',
+      [lender.id]
+    );
+
+    // Store new token
+    await db.query(
+      'INSERT INTO password_resets (lender_id, token, expires_at) VALUES ($1, $2, $3)',
+      [lender.id, token, expiresAt]
+    );
+
+    const resetUrl = `${process.env.FRONTEND_URL}/manbi-reset-password.html?token=${token}`;
+
+    // Send email via Resend
+    await resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL,
+      to: email,
+      subject: 'Reset your Manbi password',
+      html: `
+        <div style="font-family:'DM Sans',Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#fff">
+          <div style="margin-bottom:24px">
+            <span style="font-family:Georgia,serif;font-size:22px;color:#0F1C17;font-weight:700">Man<span style="color:#F5C842">bi</span></span>
+          </div>
+          <h2 style="font-size:22px;color:#0F1C17;margin-bottom:8px">Reset your password</h2>
+          <p style="font-size:15px;color:rgba(15,28,23,.65);line-height:1.6;margin-bottom:24px">
+            Hi ${lender.fname}, we received a request to reset your Manbi password. Click the button below to set a new one.
+          </p>
+          <a href="${resetUrl}" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500;margin-bottom:24px">
+            Reset my password →
+          </a>
+          <p style="font-size:13px;color:rgba(15,28,23,.45);line-height:1.6">
+            This link expires in <strong>1 hour</strong>. If you didn't request a password reset, you can safely ignore this email — your account is secure.
+          </p>
+          <hr style="border:none;border-top:1px solid rgba(15,28,23,.08);margin:24px 0">
+          <p style="font-size:12px;color:rgba(15,28,23,.35)">© 2026 SC Manbi LBG · Zero-interest crowdfunded loans for Ghana's entrepreneurs</p>
+        </div>
+      `
+    });
+
+    res.json({ message: 'If an account exists with this email, a reset link has been sent.' });
+
+  } catch (err) {
+    console.error('Forgot password error:', err.message);
+    res.status(500).json({ error: 'Failed to send reset email. Please try again.' });
+  }
+});
+
+// ── RESET PASSWORD ──
+router.post('/reset-password', async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password) return res.status(400).json({ error: 'Token and new password are required.' });
+  if (password.length < 8) return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+
+  try {
+    // Find valid unused token
+    const result = await db.query(
+      `SELECT pr.*, l.email, l.fname FROM password_resets pr
+       JOIN lenders l ON l.id = pr.lender_id
+       WHERE pr.token = $1 AND pr.used = FALSE AND pr.expires_at > NOW()`,
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ error: 'This reset link is invalid or has expired. Please request a new one.' });
+    }
+
+    const reset = result.rows[0];
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    // Update password
+    await db.query(
+      'UPDATE lenders SET password_hash = $1 WHERE id = $2',
+      [hashedPassword, reset.lender_id]
+    );
+
+    // Mark token as used
+    await db.query(
+      'UPDATE password_resets SET used = TRUE WHERE id = $1',
+      [reset.id]
+    );
+
+    // Send confirmation email
+    await resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL,
+      to: reset.email,
+      subject: 'Your Manbi password has been changed',
+      html: `
+        <div style="font-family:'DM Sans',Arial,sans-serif;max-width:520px;margin:0 auto;padding:32px 24px;background:#fff">
+          <div style="margin-bottom:24px">
+            <span style="font-family:Georgia,serif;font-size:22px;color:#0F1C17;font-weight:700">Man<span style="color:#F5C842">bi</span></span>
+          </div>
+          <h2 style="font-size:22px;color:#0F1C17;margin-bottom:8px">Password changed ✓</h2>
+          <p style="font-size:15px;color:rgba(15,28,23,.65);line-height:1.6;margin-bottom:24px">
+            Hi ${reset.fname}, your Manbi password has been successfully changed. You can now log in with your new password.
+          </p>
+          <p style="font-size:13px;color:rgba(15,28,23,.45);line-height:1.6">
+            If you did not make this change, please contact us immediately at <a href="mailto:manbiinitiative@gmail.com" style="color:#1A9070">manbiinitiative@gmail.com</a>.
+          </p>
+          <hr style="border:none;border-top:1px solid rgba(15,28,23,.08);margin:24px 0">
+          <p style="font-size:12px;color:rgba(15,28,23,.35)">© 2026 SC Manbi LBG · Zero-interest crowdfunded loans for Ghana's entrepreneurs</p>
+        </div>
+      `
+    });
+
+    res.json({ message: 'Password reset successfully. You can now log in.' });
+
+  } catch (err) {
+    console.error('Reset password error:', err.message);
+    res.status(500).json({ error: 'Failed to reset password. Please try again.' });
   }
 });
 
