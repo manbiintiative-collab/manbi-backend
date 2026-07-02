@@ -173,16 +173,17 @@ router.get('/:id/schedule', requireAuth, async (req, res) => {
 router.get('/my/funded', requireAuth, async (req, res) => {
   try {
     const result = await db.query(
-      `SELECT l.*, f.amount as my_contribution, f.status as payment_status,
-        f.created_at as funded_at,
+      `SELECT l.*,
+        COALESCE(SUM(f.amount), 0) as my_contribution,
         COALESCE(SUM(f2.amount), 0) as total_raised,
-        ROUND((COALESCE(SUM(f2.amount), 0) / l.goal_amount * 100)::numeric, 0) as pct_funded
+        ROUND((COALESCE(SUM(f2.amount), 0) / l.goal_amount * 100)::numeric, 0) as pct_funded,
+        MAX(f.created_at) as funded_at
        FROM funding f
        JOIN loans l ON l.id = f.loan_id
        LEFT JOIN funding f2 ON f2.loan_id = l.id
        WHERE f.lender_id = $1
-       GROUP BY l.id, f.amount, f.status, f.created_at
-       ORDER BY f.created_at DESC`,
+       GROUP BY l.id
+       ORDER BY MAX(f.created_at) DESC`,
       [req.user.id]
     );
     res.json(result.rows);
