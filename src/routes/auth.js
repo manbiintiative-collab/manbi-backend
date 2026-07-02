@@ -164,6 +164,11 @@ router.post('/login', loginRules, async (req, res) => {
     }
 
     const lender = result.rows[0];
+
+    if (lender.suspended) {
+      return res.status(403).json({ error: 'Your account has been suspended. Please contact manbiinitiative@gmail.com.' });
+    }
+
     const validPassword = await bcrypt.compare(password, lender.password_hash);
 
     if (!validPassword) {

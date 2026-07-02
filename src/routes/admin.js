@@ -15,6 +15,85 @@ router.get('/applications', requireAdmin, async (req, res) => {
   }
 });
 
+// ── DELETE APPLICATION ──
+router.delete('/applications/:id', requireAdmin, async (req, res) => {
+  try {
+    await db.query('DELETE FROM borrower_interests WHERE id = $1', [req.params.id]);
+    res.json({ message: 'Application deleted.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete application.' });
+  }
+});
+
+// ── SUSPEND / UNSUSPEND LOAN ──
+router.patch('/loans/:id/suspend', requireAdmin, async (req, res) => {
+  const { suspended } = req.body;
+  try {
+    const result = await db.query(
+      'UPDATE loans SET suspended = $1 WHERE id = $2 RETURNING *',
+      [suspended, req.params.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update loan.' });
+  }
+});
+
+// ── DELETE LOAN ──
+router.delete('/loans/:id', requireAdmin, async (req, res) => {
+  try {
+    // Safety check — don't delete if funding exists
+    const check = await db.query(
+      'SELECT COALESCE(SUM(amount),0) as raised FROM funding WHERE loan_id = $1',
+      [req.params.id]
+    );
+    if (parseFloat(check.rows[0].raised) > 0) {
+      return res.status(400).json({ error: 'Cannot delete a loan that has received funding. Suspend it instead.' });
+    }
+    await db.query('DELETE FROM repayments WHERE loan_id = $1', [req.params.id]);
+    await db.query('DELETE FROM loans WHERE id = $1', [req.params.id]);
+    res.json({ message: 'Loan deleted.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete loan.' });
+  }
+});
+
+// ── SUSPEND / UNSUSPEND LENDER ──
+router.patch('/lenders/:id/suspend', requireAdmin, async (req, res) => {
+  const { suspended } = req.body;
+  try {
+    const result = await db.query(
+      'UPDATE lenders SET suspended = $1 WHERE id = $2 RETURNING *',
+      [suspended, req.params.id]
+    );
+    res.json(result.rows[0]);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update lender.' });
+  }
+});
+
+// ── DELETE LENDER ──
+router.delete('/lenders/:id', requireAdmin, async (req, res) => {
+  try {
+    // Safety checks
+    const check = await db.query(
+      'SELECT vault_balance, (SELECT COUNT(*) FROM funding WHERE lender_id = $1) as loans_funded FROM lenders WHERE id = $1',
+      [req.params.id]
+    );
+    if (!check.rows[0]) return res.status(404).json({ error: 'Lender not found.' });
+    if (parseFloat(check.rows[0].vault_balance) > 0) {
+      return res.status(400).json({ error: 'Cannot delete — lender has a vault balance. Suspend instead.' });
+    }
+    if (parseInt(check.rows[0].loans_funded) > 0) {
+      return res.status(400).json({ error: 'Cannot delete — lender has funded loans on record. Suspend instead.' });
+    }
+    await db.query('DELETE FROM lenders WHERE id = $1', [req.params.id]);
+    res.json({ message: 'Lender account deleted.' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete lender.' });
+  }
+});
+
 // ── GET ALL LOANS (ANY STATUS) — FOR ADMIN PANEL ──
 router.get('/loans', requireAdmin, async (req, res) => {
   try {
