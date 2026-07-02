@@ -10,6 +10,62 @@ const db = require('../db');
 const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const resend = new Resend(process.env.RESEND_API_KEY);
 
+// ── EMAIL TEMPLATE HELPER ──
+function emailTemplate(content) {
+  return `
+    <div style="font-family:'DM Sans',Arial,sans-serif;max-width:520px;margin:0 auto;background:#fff">
+      <!-- Header -->
+      <div style="background:#0F1C17;padding:24px 32px;border-radius:12px 12px 0 0">
+        <span style="font-family:Georgia,serif;font-size:24px;color:#fff;font-weight:700;letter-spacing:-.5px">Man<span style="color:#F5C842">bi</span></span>
+        <div style="font-size:11px;color:rgba(255,255,255,.4);margin-top:2px;letter-spacing:.5px;text-transform:uppercase">Zero-interest crowdfunded loans</div>
+      </div>
+      <!-- Body -->
+      <div style="padding:32px;border:1px solid #E5E7EB;border-top:none;border-radius:0 0 12px 12px">
+        ${content}
+        <hr style="border:none;border-top:1px solid #F3F4F6;margin:28px 0 20px">
+        <p style="font-size:11px;color:#9CA3AF;line-height:1.6;margin:0">
+          © 2026 SC Manbi LBG · Zero-interest crowdfunded loans for Ghana's entrepreneurs<br>
+          Questions? <a href="mailto:manbiinitiative@gmail.com" style="color:#1A9070;text-decoration:none">manbiinitiative@gmail.com</a>
+        </p>
+      </div>
+    </div>
+  `;
+}
+
+// ── SEND WELCOME EMAIL ──
+async function sendWelcomeEmail(fname, email) {
+  try {
+    await resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL,
+      to: email,
+      subject: `Welcome to Manbi, ${fname}! 🌱`,
+      html: emailTemplate(`
+        <h2 style="font-size:24px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">Welcome to Manbi, ${fname}! 🌱</h2>
+        <p style="font-size:15px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+          You've just joined a growing community of people who believe that access to fair, interest-free capital can change lives in Ghana.
+        </p>
+        <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:24px">
+          <div style="font-size:13px;font-weight:600;color:#065F46;margin-bottom:12px;text-transform:uppercase;letter-spacing:.4px">What you can do on Manbi</div>
+          <div style="display:flex;flex-direction:column;gap:10px">
+            <div style="font-size:14px;color:#374151">🌾 <strong>Browse entrepreneurs</strong> — real people, real businesses, real dreams</div>
+            <div style="font-size:14px;color:#374151">💰 <strong>Fund from GHS 10</strong> — because 10 cedis can change a life</div>
+            <div style="font-size:14px;color:#374151">🔄 <strong>Get repaid</strong> — and choose to reinvest, cash out, or donate</div>
+          </div>
+        </div>
+        <a href="${process.env.FRONTEND_URL}/manbi-dashboard.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500;margin-bottom:20px">
+          Start lending →
+        </a>
+        <p style="font-size:13px;color:#6B7280;line-height:1.6;margin:0">
+          If you have any questions, just reply to this email — we're a small team and we read every message.
+        </p>
+      `)
+    });
+  } catch (err) {
+    console.error('Welcome email error:', err.message);
+    // Don't fail registration if email fails
+  }
+}
+
 // ── VALIDATION RULES ──
 const registerRules = [
   body('fname').trim().notEmpty().withMessage('First name is required').isLength({ max: 100 }),
@@ -76,6 +132,9 @@ router.post('/register', registerRules, async (req, res) => {
     );
 
     res.status(201).json({ token, refreshToken, user: lender });
+
+    // Send welcome email (non-blocking)
+    sendWelcomeEmail(lender.fname, lender.email);
 
   } catch (err) {
     console.error('Register error:', err.message);
@@ -254,6 +313,9 @@ router.post('/google', async (req, res) => {
     delete lender.password_hash;
     res.json({ token, refreshToken, user: lender, isNew });
 
+    // Send welcome email for new signups only (non-blocking)
+    if (isNew) sendWelcomeEmail(lender.fname, lender.email);
+
   } catch (err) {
     console.error('Google auth error:', err.message);
     res.status(500).json({ error: 'Google sign-in failed. Please try again.' });
@@ -398,3 +460,5 @@ router.post('/reset-password', async (req, res) => {
 });
 
 module.exports = router;
+module.exports.emailTemplate = emailTemplate;
+module.exports.resend = resend;

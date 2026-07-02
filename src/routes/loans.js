@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const db = require('../db');
 const { requireAuth } = require('../middleware/auth');
+const { emailTemplate, resend } = require('./auth');
 
 // ── GET ALL OPEN LOANS ──
 router.get('/', async (req, res) => {
@@ -101,6 +102,46 @@ router.post('/:id/fund', requireAuth, async (req, res) => {
     const newRaised = parseFloat(loan.raised) + parseFloat(amount);
     if (newRaised >= loan.goal_amount) {
       await db.query("UPDATE loans SET status = 'funded' WHERE id = $1", [loanId]);
+    }
+
+    // Send funding confirmation email (non-blocking)
+    try {
+      const lenderResult = await db.query(
+        'SELECT fname, email FROM lenders WHERE id = $1', [lenderId]
+      );
+      if (lenderResult.rows[0]) {
+        const l = lenderResult.rows[0];
+        const isFullyFunded = newRaised >= loan.goal_amount;
+        resend.emails.send({
+          from: process.env.RESEND_FROM_EMAIL,
+          to: l.email,
+          subject: `You just funded ${loan.entrepreneur_name} on Manbi 🌱`,
+          html: emailTemplate(`
+            <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">Your impact is live, ${l.fname}!</h2>
+            <p style="font-size:15px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+              You just contributed <strong>GHS ${parseFloat(amount).toFixed(2)}</strong> to <strong>${loan.entrepreneur_name}</strong> in ${loan.location}. Here's what happens next.
+            </p>
+            <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:24px">
+              <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Loan:</strong> ${loan.entrepreneur_name} · ${loan.sector} · ${loan.location}</div>
+              <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Your contribution:</strong> GHS ${parseFloat(amount).toFixed(2)}</div>
+              <div style="font-size:13px;color:#374151"><strong>Loan goal:</strong> GHS ${parseFloat(loan.goal_amount).toLocaleString()}</div>
+            </div>
+            ${isFullyFunded ? `
+            <div style="background:#FFFBEA;border:1px solid #FDE68A;border-radius:12px;padding:16px;margin-bottom:20px">
+              <div style="font-size:14px;color:#92400E;font-weight:600">🎉 This loan is now fully funded!</div>
+              <div style="font-size:13px;color:#92400E;margin-top:4px">We'll disburse the funds to ${loan.entrepreneur_name} shortly.</div>
+            </div>` : ''}
+            <p style="font-size:14px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+              When ${loan.entrepreneur_name} makes a repayment, your proportional share will be instantly credited back to your Manbi vault.
+            </p>
+            <a href="${process.env.FRONTEND_URL}/manbi-dashboard.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
+              View your dashboard →
+            </a>
+          `)
+        });
+      }
+    } catch (emailErr) {
+      console.error('Funding email error:', emailErr.message);
     }
 
     res.status(201).json({

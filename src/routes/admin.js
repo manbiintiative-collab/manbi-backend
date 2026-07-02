@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const db = require('../db');
 const { requireAdmin } = require('../middleware/auth');
+const { emailTemplate, resend } = require('./auth');
 
 // ── GET ALL ENTREPRENEUR APPLICATIONS ──
 router.get('/applications', requireAdmin, async (req, res) => {
@@ -296,6 +297,44 @@ router.patch('/repayments/:id/paid', requireAdmin, async (req, res) => {
              VALUES ($1, 'repayment_credit', $2, 'vault', 'completed', NOW())`,
             [funder.lender_id, share]
           );
+
+          // Send repayment credit email (non-blocking)
+          try {
+            const lenderInfo = await db.query(
+              'SELECT fname, email FROM lenders WHERE id = $1', [funder.lender_id]
+            );
+            const loanInfo = await db.query(
+              'SELECT entrepreneur_name, location FROM loans WHERE id = $1', [loanId]
+            );
+            if (lenderInfo.rows[0] && loanInfo.rows[0]) {
+              const lnd = lenderInfo.rows[0];
+              const ln = loanInfo.rows[0];
+              resend.emails.send({
+                from: process.env.RESEND_FROM_EMAIL,
+                to: lnd.email,
+                subject: `GHS ${share.toFixed(2)} credited to your Manbi vault 💚`,
+                html: emailTemplate(`
+                  <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">A repayment just came in, ${lnd.fname}!</h2>
+                  <p style="font-size:15px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+                    <strong>${ln.entrepreneur_name}</strong> made a repayment on their loan and your share has been credited to your Manbi vault.
+                  </p>
+                  <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:24px;text-align:center">
+                    <div style="font-size:13px;color:#065F46;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Credited to your vault</div>
+                    <div style="font-size:36px;font-weight:700;color:#1A9070;font-family:Georgia,serif">GHS ${share.toFixed(2)}</div>
+                    <div style="font-size:13px;color:#6B7280;margin-top:4px">Installment #${repayment.installment_number} · ${ln.entrepreneur_name}</div>
+                  </div>
+                  <p style="font-size:14px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+                    Log in to your dashboard to reinvest this amount in another entrepreneur or withdraw it to your mobile money account.
+                  </p>
+                  <a href="${process.env.FRONTEND_URL}/manbi-dashboard.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
+                    View my vault →
+                  </a>
+                `)
+              });
+            }
+          } catch (emailErr) {
+            console.error('Repayment email error:', emailErr.message);
+          }
         }
       }
     }
@@ -308,6 +347,47 @@ router.patch('/repayments/:id/paid', requireAdmin, async (req, res) => {
     const { total, paid } = check.rows[0];
     if (parseInt(paid) >= parseInt(total)) {
       await db.query("UPDATE loans SET status = 'repaid' WHERE id = $1", [loanId]);
+
+      // Notify all lenders that this loan is fully repaid
+      try {
+        const loanInfo = await db.query(
+          'SELECT entrepreneur_name, location, sector FROM loans WHERE id = $1', [loanId]
+        );
+        const allFunders = await db.query(
+          `SELECT f.lender_id, f.amount, l.fname, l.email
+           FROM funding f JOIN lenders l ON l.id = f.lender_id
+           WHERE f.loan_id = $1`, [loanId]
+        );
+        if (loanInfo.rows[0]) {
+          const ln = loanInfo.rows[0];
+          for (const f of allFunders.rows) {
+            resend.emails.send({
+              from: process.env.RESEND_FROM_EMAIL,
+              to: f.email,
+              subject: `${ln.entrepreneur_name} has fully repaid their loan 🎉`,
+              html: emailTemplate(`
+                <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">Full repayment complete! 🎉</h2>
+                <p style="font-size:15px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+                  <strong>${ln.entrepreneur_name}</strong> from ${ln.location} has fully repaid their loan. Your investment made a real difference.
+                </p>
+                <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:24px;text-align:center">
+                  <div style="font-size:13px;color:#065F46;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Your contribution</div>
+                  <div style="font-size:36px;font-weight:700;color:#1A9070;font-family:Georgia,serif">GHS ${parseFloat(f.amount).toFixed(2)}</div>
+                  <div style="font-size:13px;color:#6B7280;margin-top:4px">Fully returned to your vault</div>
+                </div>
+                <p style="font-size:14px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+                  Your principal is back in your Manbi vault. You can reinvest it in another entrepreneur, withdraw it to your mobile money account, or donate it to the next person who needs it.
+                </p>
+                <a href="${process.env.FRONTEND_URL}/manbi-dashboard.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
+                  What would you like to do? →
+                </a>
+              `)
+            });
+          }
+        }
+      } catch (emailErr) {
+        console.error('Fully repaid email error:', emailErr.message);
+      }
     }
 
     res.json({
