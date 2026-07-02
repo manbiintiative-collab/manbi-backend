@@ -156,6 +156,19 @@ router.post('/:id/fund', requireAuth, async (req, res) => {
   }
 });
 
+// ── GET REPAYMENT SCHEDULE FOR A LOAN (lender view) ──
+router.get('/:id/schedule', requireAuth, async (req, res) => {
+  try {
+    const result = await db.query(
+      'SELECT * FROM repayments WHERE loan_id = $1 ORDER BY installment_number ASC',
+      [req.params.id]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch repayment schedule.' });
+  }
+});
+
 // ── GET MY FUNDED LOANS ──
 router.get('/my/funded', requireAuth, async (req, res) => {
   try {
