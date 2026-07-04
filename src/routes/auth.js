@@ -464,6 +464,6 @@ router.post('/reset-password', async (req, res) => {
   }
 });
 
+router.emailTemplate = emailTemplate;
+router.resend = resend;
 module.exports = router;
-module.exports.emailTemplate = emailTemplate;
-module.exports.resend = resend;
