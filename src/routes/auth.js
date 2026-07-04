@@ -256,12 +256,17 @@ router.post('/google', async (req, res) => {
   }
 
   try {
-    // Verify the token directly with Google — never trust raw fields from the client
-    const ticket = await googleClient.verifyIdToken({
-      idToken: credential,
-      audience: process.env.GOOGLE_CLIENT_ID,
-    });
-    const payload = ticket.getPayload();
+    // Verify token using Google's tokeninfo endpoint (more reliable on restricted IPs)
+    const tokenInfoRes = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${credential}`);
+    if (!tokenInfoRes.ok) {
+      return res.status(401).json({ error: 'Google sign-in failed. Please try again.' });
+    }
+    const payload = await tokenInfoRes.json();
+
+    // Verify the token was issued for our app
+    if (payload.aud !== process.env.GOOGLE_CLIENT_ID) {
+      return res.status(401).json({ error: 'Invalid Google token.' });
+    }
 
     const google_id = payload.sub;
     const email = (payload.email || '').toLowerCase();
