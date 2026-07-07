@@ -35,6 +35,7 @@ app.use('/api/auth',  require('./src/routes/auth'));
 app.use('/api/loans', require('./src/routes/loans'));
 app.use('/api/users', require('./src/routes/users'));
 app.use('/api/admin', require('./src/routes/admin'));
+app.use('/api/payments', require('./src/routes/payments'));
 
 // ── HEALTH CHECK ──
 app.get('/', (req, res) => {
