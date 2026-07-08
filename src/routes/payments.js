@@ -332,5 +332,255 @@ router.post('/disburse/:loan_id', requireAdmin, async (req, res) => {
   }
 });
 
+// ── SUBMIT OTP FOR COLLECTION ──
+router.post('/collect/otp', requireAuth, async (req, res) => {
+  const { external_ref, otpcode } = req.body;
+  if (!external_ref || !otpcode) {
+    return res.status(400).json({ error: 'external_ref and otpcode are required.' });
+  }
+  try {
+    // Get original funding record to retrieve phone and channel
+    const funding = await db.query(
+      "SELECT * FROM funding WHERE external_ref = $1 AND status = 'pending' LIMIT 1",
+      [external_ref]
+    );
+    if (!funding.rows[0]) {
+      return res.status(404).json({ error: 'Payment not found or already completed.' });
+    }
+    const f = funding.rows[0];
+    const channel = CHANNEL_MAP[f.payment_method.toLowerCase()] || '13';
+
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-KEY': MOOLRE_KEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        channel,
+        currency: 'GHS',
+        payer: f.phone_number,
+        amount: f.amount.toString(),
+        externalref: external_ref,
+        otpcode: otpcode.toString(),
+        accountnumber: MOOLRE_ACCOUNT
+      })
+    });
+
+    const moolreData = await moolreRes.json();
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'OTP verification failed.' });
+    }
+
+    res.json({
+      message: 'OTP verified. Please approve the USSD prompt on your phone.',
+      external_ref
+    });
+  } catch (err) {
+    console.error('Collect OTP error:', err.message);
+    res.status(500).json({ error: 'Failed to submit OTP.' });
+  }
+});
+
+// ── SUBMIT OTP FOR TOPUP ──
+router.post('/topup/otp', requireAuth, async (req, res) => {
+  const { external_ref, otpcode } = req.body;
+  const lender_id = req.user.id;
+  if (!external_ref || !otpcode) {
+    return res.status(400).json({ error: 'external_ref and otpcode are required.' });
+  }
+  try {
+    const txResult = await db.query(
+      "SELECT * FROM transactions WHERE external_ref = $1 AND lender_id = $2 AND status = 'pending' LIMIT 1",
+      [external_ref, lender_id]
+    );
+    if (!txResult.rows[0]) {
+      return res.status(404).json({ error: 'Top-up not found or already completed.' });
+    }
+    const tx = txResult.rows[0];
+    const channel = CHANNEL_MAP[tx.payment_method.toLowerCase()] || '13';
+
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-KEY': MOOLRE_KEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        channel,
+        currency: 'GHS',
+        payer: tx.phone_number,
+        amount: tx.amount.toString(),
+        externalref: external_ref,
+        otpcode: otpcode.toString(),
+        accountnumber: MOOLRE_ACCOUNT
+      })
+    });
+
+    const moolreData = await moolreRes.json();
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'OTP verification failed.' });
+    }
+
+    res.json({
+      message: 'OTP verified. Please approve the USSD prompt on your phone.',
+      external_ref
+    });
+  } catch (err) {
+    console.error('Topup OTP error:', err.message);
+    res.status(500).json({ error: 'Failed to submit OTP.' });
+  }
+});
+
+// ── VAULT TOP-UP (lender adds funds to vault via MoMo) ──
+router.post('/topup', requireAuth, async (req, res) => {
+  const { amount, phone_number, network } = req.body;
+  const lender_id = req.user.id;
+
+  if (!amount || !phone_number || !network) {
+    return res.status(400).json({ error: 'amount, phone_number and network are required.' });
+  }
+  if (amount < 10) {
+    return res.status(400).json({ error: 'Minimum top-up amount is GHS 10.' });
+  }
+
+  const channel = CHANNEL_MAP[network.toLowerCase()];
+  if (!channel) {
+    return res.status(400).json({ error: 'Invalid network. Use mtn, telecel, or airteltigo.' });
+  }
+
+  try {
+    const externalRef = genRef('TOP');
+
+    // Record pending topup in transactions table
+    await db.query(
+      `INSERT INTO transactions (lender_id, type, amount, payment_method, phone_number, status)
+       VALUES ($1, 'topup', $2, $3, $4, 'pending')`,
+      [lender_id, amount, network, phone_number]
+    );
+
+    // Store external ref — we'll need it to confirm later
+    await db.query(
+      `UPDATE transactions SET external_ref = $1 
+       WHERE lender_id = $2 AND type = 'topup' AND status = 'pending'
+       ORDER BY created_at DESC LIMIT 1`,
+      [externalRef, lender_id]
+    );
+
+    // Initiate Moolre collection
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-KEY': MOOLRE_KEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        channel,
+        currency: 'GHS',
+        payer: phone_number,
+        amount: amount.toString(),
+        externalref: externalRef,
+        accountnumber: MOOLRE_ACCOUNT
+      })
+    });
+
+    const moolreData = await moolreRes.json();
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      await db.query(
+        `UPDATE transactions SET status = 'failed' WHERE external_ref = $1`,
+        [externalRef]
+      );
+      return res.status(400).json({ error: moolreData.message || 'Top-up initiation failed.' });
+    }
+
+    res.json({
+      message: 'Top-up request sent. Please approve the USSD prompt on your phone.',
+      external_ref: externalRef,
+      requires_otp: moolreData.code === 'TP14'
+    });
+
+  } catch (err) {
+    console.error('Topup error:', err.message);
+    res.status(500).json({ error: 'Failed to initiate top-up.' });
+  }
+});
+
+// ── CHECK TOPUP STATUS (polling) ──
+router.post('/topup/status', requireAuth, async (req, res) => {
+  const { external_ref } = req.body;
+  const lender_id = req.user.id;
+  if (!external_ref) return res.status(400).json({ error: 'external_ref is required.' });
+
+  try {
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/status`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-PUBKEY': MOOLRE_PUBKEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        idtype: '1',
+        id: external_ref,
+        accountnumber: MOOLRE_ACCOUNT
+      })
+    });
+
+    const moolreData = await moolreRes.json();
+    const txStatus = moolreData.data && moolreData.data.txstatus;
+
+    if (txStatus === 1) {
+      // Payment confirmed — credit vault
+      const txResult = await db.query(
+        `SELECT * FROM transactions WHERE external_ref = $1 AND status = 'pending' LIMIT 1`,
+        [external_ref]
+      );
+      if (txResult.rows[0]) {
+        const amount = parseFloat(txResult.rows[0].amount);
+        await db.query(
+          `UPDATE lenders SET vault_balance = COALESCE(vault_balance, 0) + $1 WHERE id = $2`,
+          [amount, lender_id]
+        );
+        await db.query(
+          `UPDATE transactions SET status = 'completed' WHERE external_ref = $1`,
+          [external_ref]
+        );
+
+        // Get updated vault balance
+        const lenderResult = await db.query(
+          'SELECT vault_balance FROM lenders WHERE id = $1', [lender_id]
+        );
+        return res.json({
+          status: 'confirmed',
+          message: 'Vault topped up successfully.',
+          new_balance: lenderResult.rows[0] ? parseFloat(lenderResult.rows[0].vault_balance) : amount
+        });
+      }
+      return res.json({ status: 'confirmed', message: 'Payment confirmed.' });
+    } else if (txStatus === 0) {
+      await db.query(
+        `UPDATE transactions SET status = 'failed' WHERE external_ref = $1`,
+        [external_ref]
+      );
+      return res.json({ status: 'failed', message: 'Top-up was declined or failed.' });
+    } else {
+      return res.json({ status: 'pending', message: 'Awaiting approval.' });
+    }
+  } catch (err) {
+    console.error('Topup status error:', err.message);
+    res.status(500).json({ error: 'Failed to check top-up status.' });
+  }
+});
+
 module.exports = router;
 module.exports.confirmFunding = confirmFunding;
