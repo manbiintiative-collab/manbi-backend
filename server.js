@@ -6,6 +6,10 @@ require('dotenv').config();
 
 const app = express();
 
+// Trust Render's proxy so express-rate-limit can correctly read X-Forwarded-For
+// Without this, the rate limiter throws a ValidationError and can crash the process
+app.set('trust proxy', 1);
+
 // ── SECURITY ──
 app.use(helmet());
 app.use(cors({
