@@ -84,6 +84,13 @@ router.post('/collect', requireAuth, async (req, res) => {
 
     const moolreData = await moolreRes.json();
 
+    console.log('Collect initiate response:', JSON.stringify({
+      external_ref: externalRef,
+      status: moolreData.status,
+      code: moolreData.code,
+      message: moolreData.message
+    }));
+
     if (moolreData.status !== 1 && moolreData.status !== '1') {
       // Moolre rejected — update funding record to failed
       await db.query("UPDATE funding SET status = 'failed' WHERE id = $1", [funding.rows[0].id]);
@@ -134,6 +141,14 @@ router.post('/status', requireAuth, async (req, res) => {
 
     const moolreData = await moolreRes.json();
     const txStatus = moolreData.data && moolreData.data.txstatus;
+
+    console.log('Status check response:', JSON.stringify({
+      external_ref,
+      status: moolreData.status,
+      code: moolreData.code,
+      txstatus: txStatus,
+      data: moolreData.data
+    }));
 
     if (txStatus === 1) {
       // Payment confirmed — update funding record
@@ -371,12 +386,20 @@ router.post('/collect/otp', requireAuth, async (req, res) => {
 
     const moolreData = await moolreRes.json();
 
+    console.log('Collect OTP response:', JSON.stringify({
+      external_ref,
+      status: moolreData.status,
+      code: moolreData.code,
+      message: moolreData.message
+    }));
+
     if (moolreData.status !== 1 && moolreData.status !== '1') {
       return res.status(400).json({ error: moolreData.message || 'OTP verification failed.' });
     }
 
     res.json({
-      message: 'OTP verified. Please approve the USSD prompt on your phone.',
+      message: moolreData.message || 'OTP verified. Please approve the USSD prompt on your phone.',
+      code: moolreData.code,
       external_ref
     });
   } catch (err) {
