@@ -370,7 +370,7 @@ router.post('/collect/otp', requireAuth, async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'X-API-USER': MOOLRE_USER,
-        'X-API-PUBKEY': MOOLRE_PUBKEY
+        'X-API-KEY': MOOLRE_KEY
       },
       body: JSON.stringify({
         type: 1,
@@ -431,7 +431,7 @@ router.post('/topup/otp', requireAuth, async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'X-API-USER': MOOLRE_USER,
-        'X-API-PUBKEY': MOOLRE_PUBKEY
+        'X-API-KEY': MOOLRE_KEY
       },
       body: JSON.stringify({
         type: 1,
@@ -446,6 +446,13 @@ router.post('/topup/otp', requireAuth, async (req, res) => {
     });
 
     const moolreData = await moolreRes.json();
+
+    console.log('Topup OTP response:', JSON.stringify({
+      external_ref,
+      status: moolreData.status,
+      code: moolreData.code,
+      message: moolreData.message
+    }));
 
     if (moolreData.status !== 1 && moolreData.status !== '1') {
       return res.status(400).json({ error: moolreData.message || 'OTP verification failed.' });
