@@ -707,5 +707,93 @@ router.post('/topup/status', requireAuth, async (req, res) => {
   }
 });
 
+// ── WITHDRAW (lender sends vault balance to MoMo) ──
+router.post('/withdraw', requireAuth, async (req, res) => {
+  const { amount, phone_number, network } = req.body;
+  const lender_id = req.user.id;
+
+  if (!amount || !phone_number || !network) {
+    return res.status(400).json({ error: 'amount, phone_number and network are required.' });
+  }
+  if (amount < 1) {
+    return res.status(400).json({ error: 'Minimum withdrawal is GHS 1.' });
+  }
+
+  const channel = CHANNEL_MAP[network.toLowerCase()];
+  if (!channel) {
+    return res.status(400).json({ error: 'Invalid network. Use mtn, telecel, or airteltigo.' });
+  }
+
+  try {
+    // Check vault balance
+    const lenderResult = await db.query(
+      'SELECT vault_balance FROM lenders WHERE id = $1',
+      [lender_id]
+    );
+    if (!lenderResult.rows[0]) return res.status(404).json({ error: 'Lender not found.' });
+    const vaultBalance = parseFloat(lenderResult.rows[0].vault_balance || 0);
+
+    if (amount > vaultBalance) {
+      return res.status(400).json({ error: `Insufficient vault balance. Available: GHS ${vaultBalance.toFixed(2)}.` });
+    }
+
+    const externalRef = genRef('WDR');
+
+    // Initiate Moolre transfer to lender's MoMo
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/transfer`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-KEY': MOOLRE_KEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        channel,
+        currency: 'GHS',
+        amount: amount.toString(),
+        receiver: phone_number,
+        externalref: externalRef,
+        reference: 'Manbi vault withdrawal',
+        accountnumber: MOOLRE_ACCOUNT
+      })
+    });
+
+    const moolreData = await moolreRes.json();
+    console.log('Withdraw response:', JSON.stringify({
+      external_ref: externalRef,
+      status: moolreData.status,
+      code: moolreData.code,
+      message: moolreData.message
+    }));
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'Withdrawal failed. Please try again.' });
+    }
+
+    // Deduct from vault balance
+    await db.query(
+      'UPDATE lenders SET vault_balance = vault_balance - $1 WHERE id = $2',
+      [amount, lender_id]
+    );
+
+    // Log transaction
+    await db.query(
+      `INSERT INTO transactions (lender_id, type, amount, payment_method, phone_number, status, external_ref)
+       VALUES ($1, 'withdrawal', $2, $3, $4, 'completed', $5)`,
+      [lender_id, amount, network, phone_number, externalRef]
+    );
+
+    res.json({
+      message: `GHS ${amount} sent to ${phone_number} successfully.`,
+      new_balance: vaultBalance - amount
+    });
+
+  } catch (err) {
+    console.error('Withdrawal error:', err.message);
+    res.status(500).json({ error: 'Failed to process withdrawal.' });
+  }
+});
+
 module.exports = router;
 module.exports.confirmFunding = confirmFunding;
