@@ -593,17 +593,9 @@ router.post('/topup', requireAuth, async (req, res) => {
 
     // Record pending topup in transactions table
     await db.query(
-      `INSERT INTO transactions (lender_id, type, amount, payment_method, phone_number, status)
-       VALUES ($1, 'topup', $2, $3, $4, 'pending')`,
-      [lender_id, amount, network, phone_number]
-    );
-
-    // Store external ref — we'll need it to confirm later
-    await db.query(
-      `UPDATE transactions SET external_ref = $1 
-       WHERE lender_id = $2 AND type = 'topup' AND status = 'pending'
-       ORDER BY created_at DESC LIMIT 1`,
-      [externalRef, lender_id]
+      `INSERT INTO transactions (lender_id, type, amount, payment_method, phone_number, status, external_ref)
+       VALUES ($1, 'topup', $2, $3, $4, 'pending', $5)`,
+      [lender_id, amount, network, phone_number, externalRef]
     );
 
     // Initiate Moolre collection
