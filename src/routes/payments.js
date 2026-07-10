@@ -276,7 +276,7 @@ router.post('/disburse/:loan_id', requireAdmin, async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'X-API-USER': MOOLRE_USER,
-        'X-API-KEY': MOOLRE_KEY
+        'X-API-PUBKEY': MOOLRE_PUBKEY
       },
       body: JSON.stringify({
         type: 1,
@@ -745,7 +745,7 @@ router.post('/withdraw', requireAuth, async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'X-API-USER': MOOLRE_USER,
-        'X-API-KEY': MOOLRE_KEY
+        'X-API-PUBKEY': MOOLRE_PUBKEY
       },
       body: JSON.stringify({
         type: 1,
