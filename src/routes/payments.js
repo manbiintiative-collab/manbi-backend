@@ -370,7 +370,7 @@ router.post('/collect/otp', requireAuth, async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'X-API-USER': MOOLRE_USER,
-        'X-API-KEY': MOOLRE_KEY
+        'X-API-PUBKEY': MOOLRE_PUBKEY
       },
       body: JSON.stringify({
         type: 1,
@@ -431,7 +431,7 @@ router.post('/topup/otp', requireAuth, async (req, res) => {
       headers: {
         'Content-Type': 'application/json',
         'X-API-USER': MOOLRE_USER,
-        'X-API-KEY': MOOLRE_KEY
+        'X-API-PUBKEY': MOOLRE_PUBKEY
       },
       body: JSON.stringify({
         type: 1,
