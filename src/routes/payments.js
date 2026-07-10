@@ -468,6 +468,109 @@ router.post('/topup/otp', requireAuth, async (req, res) => {
   }
 });
 
+// ── TRIGGER PAYMENT PROMPT (Call 3 — after OTP verified) ──
+router.post('/collect/trigger', requireAuth, async (req, res) => {
+  const { external_ref } = req.body;
+  if (!external_ref) return res.status(400).json({ error: 'external_ref is required.' });
+
+  try {
+    const funding = await db.query(
+      "SELECT * FROM funding WHERE external_ref = $1 AND status = 'pending' LIMIT 1",
+      [external_ref]
+    );
+    if (!funding.rows[0]) return res.status(404).json({ error: 'Payment not found or already completed.' });
+    const f = funding.rows[0];
+    const channel = CHANNEL_MAP[f.payment_method.toLowerCase()] || '13';
+
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-PUBKEY': MOOLRE_PUBKEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        channel,
+        currency: 'GHS',
+        payer: f.phone_number,
+        amount: f.amount.toString(),
+        externalref: external_ref,
+        accountnumber: MOOLRE_ACCOUNT
+      })
+    });
+
+    const moolreData = await moolreRes.json();
+    console.log('Collect trigger response:', JSON.stringify({
+      external_ref,
+      status: moolreData.status,
+      code: moolreData.code,
+      message: moolreData.message
+    }));
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'Failed to trigger payment prompt.' });
+    }
+
+    res.json({ message: 'Payment prompt sent to phone. Please approve with your MoMo PIN.', external_ref });
+  } catch (err) {
+    console.error('Collect trigger error:', err.message);
+    res.status(500).json({ error: 'Failed to trigger payment.' });
+  }
+});
+
+// ── TRIGGER TOPUP PAYMENT PROMPT (Call 3 for vault topup) ──
+router.post('/topup/trigger', requireAuth, async (req, res) => {
+  const { external_ref } = req.body;
+  const lender_id = req.user.id;
+  if (!external_ref) return res.status(400).json({ error: 'external_ref is required.' });
+
+  try {
+    const txResult = await db.query(
+      "SELECT * FROM transactions WHERE external_ref = $1 AND lender_id = $2 AND status = 'pending' LIMIT 1",
+      [external_ref, lender_id]
+    );
+    if (!txResult.rows[0]) return res.status(404).json({ error: 'Top-up not found or already completed.' });
+    const tx = txResult.rows[0];
+    const channel = CHANNEL_MAP[tx.payment_method.toLowerCase()] || '13';
+
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-PUBKEY': MOOLRE_PUBKEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        channel,
+        currency: 'GHS',
+        payer: tx.phone_number,
+        amount: tx.amount.toString(),
+        externalref: external_ref,
+        accountnumber: MOOLRE_ACCOUNT
+      })
+    });
+
+    const moolreData = await moolreRes.json();
+    console.log('Topup trigger response:', JSON.stringify({
+      external_ref,
+      status: moolreData.status,
+      code: moolreData.code,
+      message: moolreData.message
+    }));
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'Failed to trigger payment prompt.' });
+    }
+
+    res.json({ message: 'Payment prompt sent to phone. Please approve with your MoMo PIN.', external_ref });
+  } catch (err) {
+    console.error('Topup trigger error:', err.message);
+    res.status(500).json({ error: 'Failed to trigger top-up payment.' });
+  }
+});
+
 // ── VAULT TOP-UP (lender adds funds to vault via MoMo) ──
 router.post('/topup', requireAuth, async (req, res) => {
   const { amount, phone_number, network } = req.body;
