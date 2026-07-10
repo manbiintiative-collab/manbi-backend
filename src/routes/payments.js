@@ -271,16 +271,20 @@ router.post('/disburse/:loan_id', requireAdmin, async (req, res) => {
     const externalRef = genRef('DIS');
 
     // Initiate Moolre transfer
+    const TRANSFER_CHANNEL_MAP = { mtn: '1', telecel: '6', airteltigo: '7' };
+    const transferChannel = TRANSFER_CHANNEL_MAP[network.toLowerCase()] || '1';
+
+    // Initiate Moolre transfer
     const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/transfer`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-USER': MOOLRE_USER,
-        'X-API-PUBKEY': MOOLRE_PUBKEY
+        'X-API-KEY': MOOLRE_KEY
       },
       body: JSON.stringify({
         type: 1,
-        channel,
+        channel: transferChannel,
         currency: 'GHS',
         amount: loan.goal_amount.toString(),
         receiver: phone_number,
@@ -707,6 +711,51 @@ router.post('/topup/status', requireAuth, async (req, res) => {
   }
 });
 
+// ── VALIDATE RECIPIENT NAME (required before transfer) ──
+router.post('/validate', requireAuth, async (req, res) => {
+  const { phone_number, network } = req.body;
+  if (!phone_number || !network) {
+    return res.status(400).json({ error: 'phone_number and network are required.' });
+  }
+  const TRANSFER_CHANNEL_MAP = { mtn: '1', telecel: '6', airteltigo: '7' };
+  const channel = TRANSFER_CHANNEL_MAP[network.toLowerCase()];
+  if (!channel) return res.status(400).json({ error: 'Invalid network.' });
+
+  try {
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/validate`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-KEY': MOOLRE_KEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        receiver: phone_number,
+        channel,
+        currency: 'GHS',
+        accountnumber: MOOLRE_ACCOUNT
+      })
+    });
+
+    const moolreData = await moolreRes.json();
+    console.log('Validate response:', JSON.stringify({
+      status: moolreData.status,
+      code: moolreData.code,
+      data: moolreData.data
+    }));
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'Could not validate this number. Please check and try again.' });
+    }
+
+    res.json({ name: moolreData.data, phone_number, network });
+  } catch (err) {
+    console.error('Validate error:', err.message);
+    res.status(500).json({ error: 'Failed to validate account.' });
+  }
+});
+
 // ── WITHDRAW (lender sends vault balance to MoMo) ──
 router.post('/withdraw', requireAuth, async (req, res) => {
   const { amount, phone_number, network } = req.body;
@@ -739,17 +788,23 @@ router.post('/withdraw', requireAuth, async (req, res) => {
 
     const externalRef = genRef('WDR');
 
+    const TRANSFER_CHANNEL_MAP = { mtn: '1', telecel: '6', airteltigo: '7' };
+    const transferChannel = TRANSFER_CHANNEL_MAP[network.toLowerCase()];
+    if (!transferChannel) {
+      return res.status(400).json({ error: 'Invalid network.' });
+    }
+
     // Initiate Moolre transfer to lender's MoMo
     const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/transfer`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-API-USER': MOOLRE_USER,
-        'X-API-PUBKEY': MOOLRE_PUBKEY
+        'X-API-KEY': MOOLRE_KEY
       },
       body: JSON.stringify({
         type: 1,
-        channel,
+        channel: transferChannel,
         currency: 'GHS',
         amount: amount.toString(),
         receiver: phone_number,
