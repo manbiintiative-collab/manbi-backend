@@ -16,6 +16,21 @@ router.get('/applications', requireAdmin, async (req, res) => {
   }
 });
 
+// ── DELETE APPLICATION ──
+router.delete('/applications/:id', requireAdmin, async (req, res) => {
+  try {
+    const result = await db.query(
+      'DELETE FROM borrower_interests WHERE id = $1 RETURNING id',
+      [req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Application not found.' });
+    res.json({ message: 'Application deleted.' });
+  } catch (err) {
+    console.error('Delete application error:', err);
+    res.status(500).json({ error: 'Failed to delete application.' });
+  }
+});
+
 // ── GET ALL LOANS (ANY STATUS) — FOR ADMIN PANEL ──
 router.get('/loans', requireAdmin, async (req, res) => {
   try {
@@ -169,6 +184,55 @@ router.get('/lenders', requireAdmin, async (req, res) => {
   } catch (err) {
     console.error('Get lenders error:', err);
     res.status(500).json({ error: 'Failed to fetch lenders.' });
+  }
+});
+
+// ── SUSPEND / UNSUSPEND LENDER ──
+router.patch('/lenders/:id/suspend', requireAdmin, async (req, res) => {
+  const { suspended } = req.body;
+  if (typeof suspended !== 'boolean') {
+    return res.status(400).json({ error: 'suspended must be true or false.' });
+  }
+  try {
+    const result = await db.query(
+      'UPDATE lenders SET suspended = $1 WHERE id = $2 RETURNING id, fname, lname, email, suspended',
+      [suspended, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Lender not found.' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Suspend lender error:', err);
+    res.status(500).json({ error: 'Failed to update lender.' });
+  }
+});
+
+// ── DELETE LENDER ──
+router.delete('/lenders/:id', requireAdmin, async (req, res) => {
+  try {
+    const lenderResult = await db.query(
+      'SELECT vault_balance FROM lenders WHERE id = $1',
+      [req.params.id]
+    );
+    if (!lenderResult.rows[0]) return res.status(404).json({ error: 'Lender not found.' });
+
+    const vaultBalance = parseFloat(lenderResult.rows[0].vault_balance || 0);
+    if (vaultBalance > 0) {
+      return res.status(400).json({ error: `Cannot delete — this lender has GHS ${vaultBalance.toFixed(2)} in their vault. Suspend instead.` });
+    }
+
+    const fundedResult = await db.query(
+      'SELECT COUNT(*) as count FROM funding WHERE lender_id = $1',
+      [req.params.id]
+    );
+    if (parseInt(fundedResult.rows[0].count) > 0) {
+      return res.status(400).json({ error: 'Cannot delete — this lender has funded loans on record. Suspend instead.' });
+    }
+
+    await db.query('DELETE FROM lenders WHERE id = $1', [req.params.id]);
+    res.json({ message: 'Lender account deleted.' });
+  } catch (err) {
+    console.error('Delete lender error:', err);
+    res.status(500).json({ error: 'Failed to delete lender.' });
   }
 });
 
@@ -364,6 +428,48 @@ router.patch('/loans/:id', requireAdmin, async (req, res) => {
     res.json({ ...result.rows[0], needs_schedule: status === 'disbursed' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to update loan.' });
+  }
+});
+
+// ── SUSPEND / UNSUSPEND LOAN LISTING ──
+router.patch('/loans/:id/suspend', requireAdmin, async (req, res) => {
+  const { suspended } = req.body;
+  if (typeof suspended !== 'boolean') {
+    return res.status(400).json({ error: 'suspended must be true or false.' });
+  }
+  try {
+    const result = await db.query(
+      'UPDATE loans SET suspended = $1 WHERE id = $2 RETURNING *',
+      [suspended, req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Loan not found.' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Suspend loan error:', err);
+    res.status(500).json({ error: 'Failed to update loan.' });
+  }
+});
+
+// ── DELETE LOAN LISTING ──
+router.delete('/loans/:id', requireAdmin, async (req, res) => {
+  try {
+    const raisedResult = await db.query(
+      'SELECT COALESCE(SUM(amount), 0) as raised FROM funding WHERE loan_id = $1',
+      [req.params.id]
+    );
+    const raised = parseFloat(raisedResult.rows[0].raised);
+    if (raised > 0) {
+      return res.status(400).json({ error: `Cannot delete — this loan has received GHS ${raised.toFixed(2)} in funding. Suspend it instead.` });
+    }
+    const result = await db.query(
+      'DELETE FROM loans WHERE id = $1 RETURNING id',
+      [req.params.id]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Loan not found.' });
+    res.json({ message: 'Loan listing deleted.' });
+  } catch (err) {
+    console.error('Delete loan error:', err);
+    res.status(500).json({ error: 'Failed to delete listing.' });
   }
 });
 
