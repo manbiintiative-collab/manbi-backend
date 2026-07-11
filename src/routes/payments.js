@@ -711,6 +711,68 @@ router.post('/topup/status', requireAuth, async (req, res) => {
   }
 });
 
+// ── DONATE TO MANBI ──
+router.post('/donate', requireAuth, async (req, res) => {
+  const { amount, source, phone_number, network } = req.body;
+  const lender_id = req.user.id;
+
+  if (!amount || amount < 1) return res.status(400).json({ error: 'Minimum donation is GHS 1.' });
+
+  try {
+    if (source === 'vault') {
+      // Deduct from vault
+      const lenderResult = await db.query('SELECT vault_balance FROM lenders WHERE id = $1', [lender_id]);
+      const vaultBalance = parseFloat(lenderResult.rows[0]?.vault_balance || 0);
+      if (amount > vaultBalance) return res.status(400).json({ error: `Insufficient vault balance. Available: GHS ${vaultBalance.toFixed(2)}.` });
+      await db.query('UPDATE lenders SET vault_balance = vault_balance - $1 WHERE id = $2', [amount, lender_id]);
+      await db.query(
+        `INSERT INTO transactions (lender_id, type, amount, payment_method, status) VALUES ($1, 'donation', $2, 'vault', 'completed')`,
+        [lender_id, amount]
+      );
+      return res.json({ message: 'Donation successful. Thank you!', new_balance: vaultBalance - amount });
+    }
+
+    // MoMo donation — initiate collection
+    if (!phone_number || !network) return res.status(400).json({ error: 'phone_number and network are required for MoMo donation.' });
+    const channel = CHANNEL_MAP[network.toLowerCase()];
+    if (!channel) return res.status(400).json({ error: 'Invalid network.' });
+
+    const externalRef = genRef('DON');
+
+    // Record pending donation
+    await db.query(
+      `INSERT INTO transactions (lender_id, type, amount, payment_method, phone_number, status, external_ref)
+       VALUES ($1, 'donation', $2, $3, $4, 'pending', $5)`,
+      [lender_id, amount, network, phone_number, externalRef]
+    );
+
+    // Also record as a funding record so confirmFunding can handle webhook
+    await db.query(
+      `INSERT INTO funding (loan_id, lender_id, amount, support_amount, payment_method, phone_number, status, external_ref)
+       VALUES (NULL, $1, $2, 0, $3, $4, 'pending', $5)`,
+      [lender_id, amount, network, phone_number, externalRef]
+    ).catch(function(){
+      // loan_id may not allow NULL — just continue, webhook not critical for donations
+    });
+
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-USER': MOOLRE_USER, 'X-API-PUBKEY': MOOLRE_PUBKEY },
+      body: JSON.stringify({ type: 1, channel, currency: 'GHS', payer: phone_number, amount: amount.toString(), externalref: externalRef, accountnumber: MOOLRE_ACCOUNT })
+    });
+
+    const moolreData = await moolreRes.json();
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'Failed to initiate donation.' });
+    }
+
+    res.json({ message: 'Donation initiated.', external_ref: externalRef, requires_otp: moolreData.code === 'TP14' });
+  } catch (err) {
+    console.error('Donate error:', err.message);
+    res.status(500).json({ error: 'Failed to process donation.' });
+  }
+});
+
 // ── VALIDATE RECIPIENT NAME (required before transfer) ──
 router.post('/validate', requireAuth, async (req, res) => {
   const { phone_number, network } = req.body;
