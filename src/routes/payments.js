@@ -221,7 +221,11 @@ router.post('/webhook', async (req, res) => {
       return res.json({ received: true });
     }
     if (data && data.externalref) {
-      await confirmFunding(data.externalref);
+      if (data.externalref.indexOf('GDN-') === 0) {
+        await confirmGuestDonation(data.externalref);
+      } else {
+        await confirmFunding(data.externalref);
+      }
     }
     res.json({ received: true });
   } catch (err) {
@@ -846,6 +850,204 @@ router.post('/donate', requireAuth, async (req, res) => {
     res.status(500).json({ error: 'Failed to process donation.' });
   }
 });
+
+// ══════════════════════════════════════════════
+// GUEST DONATIONS — no login required
+// ══════════════════════════════════════════════
+
+// ── INITIATE GUEST DONATION (Call 1) ──
+router.post('/donate/guest', async (req, res) => {
+  const { donor_name, donor_email, donor_phone, amount, phone_number, network } = req.body;
+
+  if (!donor_name || !donor_name.trim()) {
+    return res.status(400).json({ error: 'Please tell us your name so we can thank you.' });
+  }
+  if (!donor_email && !donor_phone) {
+    return res.status(400).json({ error: 'Please provide an email or phone number.' });
+  }
+  if (!amount || amount < 1) {
+    return res.status(400).json({ error: 'Minimum donation is GHS 1.' });
+  }
+  if (!phone_number || !network) {
+    return res.status(400).json({ error: 'phone_number and network are required.' });
+  }
+  const channel = CHANNEL_MAP[network.toLowerCase()];
+  if (!channel) {
+    return res.status(400).json({ error: 'Invalid network. Use mtn, telecel, or airteltigo.' });
+  }
+
+  try {
+    const externalRef = genRef('GDN');
+
+    const donation = await db.query(
+      `INSERT INTO guest_donations (donor_name, donor_email, donor_phone, amount, payment_method, phone_number, status, external_ref)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7) RETURNING *`,
+      [donor_name.trim(), donor_email || null, donor_phone || null, amount, network, phone_number, externalRef]
+    );
+
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-USER': MOOLRE_USER, 'X-API-PUBKEY': MOOLRE_PUBKEY },
+      body: JSON.stringify({ type: 1, channel, currency: 'GHS', payer: phone_number, amount: amount.toString(), externalref: externalRef, accountnumber: MOOLRE_ACCOUNT })
+    });
+    const moolreData = await moolreRes.json();
+
+    console.log('Guest donate initiate response:', JSON.stringify({
+      external_ref: externalRef, status: moolreData.status, code: moolreData.code, message: moolreData.message
+    }));
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      await db.query("UPDATE guest_donations SET status = 'failed' WHERE id = $1", [donation.rows[0].id]);
+      return res.status(400).json({ error: moolreData.message || 'Failed to initiate donation.' });
+    }
+
+    res.json({ message: 'Donation initiated.', external_ref: externalRef, requires_otp: moolreData.code === 'TP14' });
+  } catch (err) {
+    console.error('Guest donate error:', err.message);
+    res.status(500).json({ error: 'Failed to process donation.' });
+  }
+});
+
+// ── SUBMIT OTP FOR GUEST DONATION (Call 2, only if required) ──
+router.post('/donate/guest/otp', async (req, res) => {
+  const { external_ref, otpcode } = req.body;
+  if (!external_ref || !otpcode) {
+    return res.status(400).json({ error: 'external_ref and otpcode are required.' });
+  }
+  try {
+    const result = await db.query(
+      "SELECT * FROM guest_donations WHERE external_ref = $1 AND status = 'pending' LIMIT 1",
+      [external_ref]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Donation not found or already completed.' });
+    const d = result.rows[0];
+    const channel = CHANNEL_MAP[d.payment_method.toLowerCase()] || '13';
+
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-USER': MOOLRE_USER, 'X-API-PUBKEY': MOOLRE_PUBKEY },
+      body: JSON.stringify({ type: 1, channel, currency: 'GHS', payer: d.phone_number, amount: d.amount.toString(), externalref: external_ref, otpcode: otpcode.toString(), accountnumber: MOOLRE_ACCOUNT })
+    });
+    const moolreData = await moolreRes.json();
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'OTP verification failed.' });
+    }
+    res.json({ message: moolreData.message || 'OTP verified.', external_ref });
+  } catch (err) {
+    console.error('Guest donate OTP error:', err.message);
+    res.status(500).json({ error: 'Failed to submit OTP.' });
+  }
+});
+
+// ── TRIGGER GUEST DONATION PAYMENT PROMPT (Call 3, only after OTP) ──
+router.post('/donate/guest/trigger', async (req, res) => {
+  const { external_ref } = req.body;
+  if (!external_ref) return res.status(400).json({ error: 'external_ref is required.' });
+  try {
+    const result = await db.query(
+      "SELECT * FROM guest_donations WHERE external_ref = $1 AND status = 'pending' LIMIT 1",
+      [external_ref]
+    );
+    if (!result.rows[0]) return res.status(404).json({ error: 'Donation not found or already completed.' });
+    const d = result.rows[0];
+    const channel = CHANNEL_MAP[d.payment_method.toLowerCase()] || '13';
+
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/payment`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-USER': MOOLRE_USER, 'X-API-PUBKEY': MOOLRE_PUBKEY },
+      body: JSON.stringify({ type: 1, channel, currency: 'GHS', payer: d.phone_number, amount: d.amount.toString(), externalref: external_ref, accountnumber: MOOLRE_ACCOUNT })
+    });
+    const moolreData = await moolreRes.json();
+
+    if (moolreData.status !== 1 && moolreData.status !== '1') {
+      return res.status(400).json({ error: moolreData.message || 'Failed to trigger payment prompt.' });
+    }
+    res.json({ message: 'Payment prompt sent to phone.', external_ref });
+  } catch (err) {
+    console.error('Guest donate trigger error:', err.message);
+    res.status(500).json({ error: 'Failed to trigger payment.' });
+  }
+});
+
+// ── CHECK GUEST DONATION STATUS (polling) ──
+router.post('/donate/guest/status', async (req, res) => {
+  const { external_ref } = req.body;
+  if (!external_ref) return res.status(400).json({ error: 'external_ref is required.' });
+  try {
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/transact/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-API-USER': MOOLRE_USER, 'X-API-PUBKEY': MOOLRE_PUBKEY },
+      body: JSON.stringify({ type: 1, idtype: '1', id: external_ref, accountnumber: MOOLRE_ACCOUNT })
+    });
+    const moolreData = await moolreRes.json();
+    const txStatus = moolreData.data && moolreData.data.txstatus;
+
+    if (txStatus === 1) {
+      await confirmGuestDonation(external_ref);
+      return res.json({ status: 'confirmed', message: 'Payment confirmed.' });
+    } else if (txStatus === 0) {
+      return res.json({ status: 'failed', message: 'Payment failed or was rejected.' });
+    } else {
+      return res.json({ status: 'pending', message: 'Payment is still pending approval.' });
+    }
+  } catch (err) {
+    console.error('Guest donate status error:', err.message);
+    res.status(500).json({ error: 'Failed to check payment status.' });
+  }
+});
+
+// ── CONFIRM GUEST DONATION (shared logic for webhook + polling) ──
+async function confirmGuestDonation(externalRef) {
+  const result = await db.query(
+    "SELECT * FROM guest_donations WHERE external_ref = $1 AND status = 'pending'",
+    [externalRef]
+  );
+  if (!result.rows[0]) return; // Already confirmed or not found
+
+  const donation = result.rows[0];
+  await db.query(
+    "UPDATE guest_donations SET status = 'completed', confirmed_at = NOW() WHERE id = $1",
+    [donation.id]
+  );
+
+  try {
+    const { emailTemplate, resend } = require('./auth');
+    const firstName = donation.donor_name.split(' ')[0];
+
+    if (donation.donor_email) {
+      resend.emails.send({
+        from: process.env.RESEND_FROM_EMAIL,
+        to: donation.donor_email,
+        subject: `Thank you, ${firstName} — you're keeping Manbi alive 💛`,
+        html: emailTemplate(`
+          <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">Thank you, ${firstName}!</h2>
+          <p style="font-size:15px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+            Your donation of <strong>GHS ${parseFloat(donation.amount).toFixed(2)}</strong> has been confirmed. Because Manbi charges zero interest, gifts like yours are what keep the platform running and reaching more Ghanaian entrepreneurs.
+          </p>
+          <a href="${process.env.FRONTEND_URL}" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
+            See who you're helping →
+          </a>
+        `)
+      }).catch(function(e){ console.error('Guest donation thank-you email error:', e.message); });
+    }
+
+    resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL,
+      to: 'manbifunds@gmail.com',
+      subject: `💛 New guest donation: GHS ${parseFloat(donation.amount).toFixed(2)} from ${donation.donor_name}`,
+      html: emailTemplate(`
+        <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">New guest donation received!</h2>
+        <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:20px">
+          <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Donor:</strong> ${donation.donor_name}${donation.donor_email ? ' (' + donation.donor_email + ')' : ''}${donation.donor_phone ? ' · ' + donation.donor_phone : ''}</div>
+          <div style="font-size:13px;color:#374151"><strong>Amount:</strong> GHS ${parseFloat(donation.amount).toFixed(2)}</div>
+        </div>
+      `)
+    }).catch(function(e){ console.error('Guest donation admin notification error:', e.message); });
+  } catch (emailErr) {
+    console.error('Guest donation confirmation email error:', emailErr.message);
+  }
+}
 
 // ── VALIDATE RECIPIENT NAME (required before transfer) ──
 router.post('/validate', requireAuth, async (req, res) => {
