@@ -9,6 +9,8 @@ const MOOLRE_USER = process.env.MOOLRE_USERNAME;
 const MOOLRE_KEY = process.env.MOOLRE_API_KEY;
 const MOOLRE_PUBKEY = process.env.MOOLRE_PUBLIC_KEY;
 const MOOLRE_ACCOUNT = process.env.MOOLRE_ACCOUNT_NUMBER;
+const MOOLRE_VAS_KEY = process.env.MOOLRE_VAS_KEY;
+const MOOLRE_SENDER_ID = process.env.MOOLRE_SENDER_ID || 'MANBI';
 
 // Channel mapping
 const CHANNEL_MAP = { mtn: '13', telecel: '6', airteltigo: '7' };
@@ -17,6 +19,52 @@ const CHANNEL_MAP = { mtn: '13', telecel: '6', airteltigo: '7' };
 function genRef(prefix) {
   return prefix + '-' + Date.now() + '-' + crypto.randomBytes(4).toString('hex');
 }
+
+// ── SEND SMS VIA MOOLRE ──
+async function sendSMS(phone, message) {
+  if (!MOOLRE_VAS_KEY || !phone) return;
+  try {
+    const res = await fetch(`${MOOLRE_URL}/open/sms/send`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-VASKEY': MOOLRE_VAS_KEY
+      },
+      body: JSON.stringify({
+        type: 1,
+        senderid: MOOLRE_SENDER_ID,
+        messages: [{ recipient: phone, message }]
+      })
+    });
+    const data = await res.json();
+    console.log('SMS response:', JSON.stringify({ phone, status: data.status, code: data.code }));
+  } catch (err) {
+    console.error('SMS error:', err.message);
+  }
+}
+
+// ── REGISTER SENDER ID ──
+router.post('/sms/register-sender', requireAdmin, async (req, res) => {
+  try {
+    const moolreRes = await fetch(`${MOOLRE_URL}/open/sms/query`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-API-USER': MOOLRE_USER,
+        'X-API-VASKEY': MOOLRE_VAS_KEY
+      },
+      body: JSON.stringify({
+        type: 3,
+        senderids: [{ senderid: MOOLRE_SENDER_ID }]
+      })
+    });
+    const data = await moolreRes.json();
+    res.json(data);
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to register sender ID.' });
+  }
+});
 
 // ── INITIATE COLLECTION (lender funds a loan) ──
 router.post('/collect', requireAuth, async (req, res) => {
@@ -335,9 +383,15 @@ router.post('/disburse/:loan_id', requireAdmin, async (req, res) => {
     }
 
     await db.query(
-      "UPDATE loans SET status = 'disbursed', disbursed_at = $1 WHERE id = $2",
-      [startDate.toISOString(), loan_id]
+      "UPDATE loans SET status = 'disbursed', disbursed_at = $1, entrepreneur_phone = $2, entrepreneur_network = $3 WHERE id = $4",
+      [startDate.toISOString(), phone_number, network, loan_id]
     );
+
+    // Send disbursement SMS to entrepreneur (non-blocking)
+    const installmentAmt = schedule.find(function(s) { return s.amount > 0; });
+    const firstRepayDate = schedule.find(function(s) { return s.amount > 0; });
+    const smsMsg = `Hi ${loan.entrepreneur_name.split(' ')[0]}, GHS ${loan.goal_amount} has been sent to your MoMo from Manbi. Repay GHS ${installmentAmt ? installmentAmt.amount.toFixed(2) : '-'}/month starting ${firstRepayDate ? firstRepayDate.due_date : '-'}. Send repayments to your Manbi agent. Thank you!`;
+    sendSMS(phone_number, smsMsg);
 
     res.json({
       message: `GHS ${loan.goal_amount} disbursed to ${phone_number} successfully.`,
@@ -913,4 +967,5 @@ router.post('/withdraw', requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+module.exports.sendSMS = sendSMS;
 module.exports.confirmFunding = confirmFunding;

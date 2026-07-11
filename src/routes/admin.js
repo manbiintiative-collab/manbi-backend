@@ -2,6 +2,7 @@ const router = require('express').Router();
 const db = require('../db');
 const { requireAdmin } = require('../middleware/auth');
 const { emailTemplate, resend } = require('./auth');
+const { sendSMS } = require('./payments');
 
 // ── GET ALL ENTREPRENEUR APPLICATIONS ──
 router.get('/applications', requireAdmin, async (req, res) => {
@@ -12,85 +13,6 @@ router.get('/applications', requireAdmin, async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch applications.' });
-  }
-});
-
-// ── DELETE APPLICATION ──
-router.delete('/applications/:id', requireAdmin, async (req, res) => {
-  try {
-    await db.query('DELETE FROM borrower_interests WHERE id = $1', [req.params.id]);
-    res.json({ message: 'Application deleted.' });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to delete application.' });
-  }
-});
-
-// ── SUSPEND / UNSUSPEND LOAN ──
-router.patch('/loans/:id/suspend', requireAdmin, async (req, res) => {
-  const { suspended } = req.body;
-  try {
-    const result = await db.query(
-      'UPDATE loans SET suspended = $1 WHERE id = $2 RETURNING *',
-      [suspended, req.params.id]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to update loan.' });
-  }
-});
-
-// ── DELETE LOAN ──
-router.delete('/loans/:id', requireAdmin, async (req, res) => {
-  try {
-    // Safety check — don't delete if funding exists
-    const check = await db.query(
-      'SELECT COALESCE(SUM(amount),0) as raised FROM funding WHERE loan_id = $1',
-      [req.params.id]
-    );
-    if (parseFloat(check.rows[0].raised) > 0) {
-      return res.status(400).json({ error: 'Cannot delete a loan that has received funding. Suspend it instead.' });
-    }
-    await db.query('DELETE FROM repayments WHERE loan_id = $1', [req.params.id]);
-    await db.query('DELETE FROM loans WHERE id = $1', [req.params.id]);
-    res.json({ message: 'Loan deleted.' });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to delete loan.' });
-  }
-});
-
-// ── SUSPEND / UNSUSPEND LENDER ──
-router.patch('/lenders/:id/suspend', requireAdmin, async (req, res) => {
-  const { suspended } = req.body;
-  try {
-    const result = await db.query(
-      'UPDATE lenders SET suspended = $1 WHERE id = $2 RETURNING *',
-      [suspended, req.params.id]
-    );
-    res.json(result.rows[0]);
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to update lender.' });
-  }
-});
-
-// ── DELETE LENDER ──
-router.delete('/lenders/:id', requireAdmin, async (req, res) => {
-  try {
-    // Safety checks
-    const check = await db.query(
-      'SELECT vault_balance, (SELECT COUNT(*) FROM funding WHERE lender_id = $1) as loans_funded FROM lenders WHERE id = $1',
-      [req.params.id]
-    );
-    if (!check.rows[0]) return res.status(404).json({ error: 'Lender not found.' });
-    if (parseFloat(check.rows[0].vault_balance) > 0) {
-      return res.status(400).json({ error: 'Cannot delete — lender has a vault balance. Suspend instead.' });
-    }
-    if (parseInt(check.rows[0].loans_funded) > 0) {
-      return res.status(400).json({ error: 'Cannot delete — lender has funded loans on record. Suspend instead.' });
-    }
-    await db.query('DELETE FROM lenders WHERE id = $1', [req.params.id]);
-    res.json({ message: 'Lender account deleted.' });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to delete lender.' });
   }
 });
 
@@ -128,7 +50,7 @@ router.post('/loans', requireAdmin, async (req, res) => {
     purpose, goal_amount, loan_term_months, repayment_plan,
     narrative, profile_photo_url, video_url,
     partner_name, partner_description, partner_logo_url, partner_contact,
-    featured, repayment_track
+    featured, repayment_track, entrepreneur_phone, entrepreneur_network
   } = req.body;
 
   if (!entrepreneur_name || !location || !sector || !purpose || !goal_amount) {
@@ -147,8 +69,8 @@ router.post('/loans', requireAdmin, async (req, res) => {
         purpose, goal_amount, loan_term_months, repayment_plan,
         narrative, profile_photo_url, video_url,
         partner_name, partner_description, partner_logo_url, partner_contact,
-        featured, repayment_track, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,'active')
+        featured, repayment_track, entrepreneur_phone, entrepreneur_network, status
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'active')
       RETURNING *`,
       [
         entrepreneur_name, initials || entrepreneur_name.substring(0,2).toUpperCase(),
@@ -157,7 +79,8 @@ router.post('/loans', requireAdmin, async (req, res) => {
         profile_photo_url, video_url,
         partner_name || null, partner_description || null,
         partner_logo_url || null, partner_contact || null,
-        featured || false, repayment_track || 'standard'
+        featured || false, repayment_track || 'standard',
+        entrepreneur_phone || null, entrepreneur_network || 'mtn'
       ]
     );
     res.status(201).json(result.rows[0]);
@@ -376,44 +299,6 @@ router.patch('/repayments/:id/paid', requireAdmin, async (req, res) => {
              VALUES ($1, 'repayment_credit', $2, 'vault', 'completed', NOW())`,
             [funder.lender_id, share]
           );
-
-          // Send repayment credit email (non-blocking)
-          try {
-            const lenderInfo = await db.query(
-              'SELECT fname, email FROM lenders WHERE id = $1', [funder.lender_id]
-            );
-            const loanInfo = await db.query(
-              'SELECT entrepreneur_name, location FROM loans WHERE id = $1', [loanId]
-            );
-            if (lenderInfo.rows[0] && loanInfo.rows[0]) {
-              const lnd = lenderInfo.rows[0];
-              const ln = loanInfo.rows[0];
-              resend.emails.send({
-                from: process.env.RESEND_FROM_EMAIL,
-                to: lnd.email,
-                subject: `GHS ${share.toFixed(2)} credited to your Manbi vault 💚`,
-                html: emailTemplate(`
-                  <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">A repayment just came in, ${lnd.fname}!</h2>
-                  <p style="font-size:15px;color:#4B5563;line-height:1.7;margin:0 0 20px">
-                    <strong>${ln.entrepreneur_name}</strong> made a repayment on their loan and your share has been credited to your Manbi vault.
-                  </p>
-                  <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:24px;text-align:center">
-                    <div style="font-size:13px;color:#065F46;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Credited to your vault</div>
-                    <div style="font-size:36px;font-weight:700;color:#1A9070;font-family:Georgia,serif">GHS ${share.toFixed(2)}</div>
-                    <div style="font-size:13px;color:#6B7280;margin-top:4px">Installment #${repayment.installment_number} · ${ln.entrepreneur_name}</div>
-                  </div>
-                  <p style="font-size:14px;color:#4B5563;line-height:1.7;margin:0 0 20px">
-                    Log in to your dashboard to reinvest this amount in another entrepreneur or withdraw it to your mobile money account.
-                  </p>
-                  <a href="${process.env.FRONTEND_URL}/manbi-dashboard.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
-                    View my vault →
-                  </a>
-                `)
-              });
-            }
-          } catch (emailErr) {
-            console.error('Repayment email error:', emailErr.message);
-          }
         }
       }
     }
@@ -424,49 +309,32 @@ router.patch('/repayments/:id/paid', requireAdmin, async (req, res) => {
       [loanId]
     );
     const { total, paid } = check.rows[0];
-    if (parseInt(paid) >= parseInt(total)) {
+    const allPaid = parseInt(paid) >= parseInt(total);
+    if (allPaid) {
       await db.query("UPDATE loans SET status = 'repaid' WHERE id = $1", [loanId]);
+    }
 
-      // Notify all lenders that this loan is fully repaid
-      try {
-        const loanInfo = await db.query(
-          'SELECT entrepreneur_name, location, sector FROM loans WHERE id = $1', [loanId]
-        );
-        const allFunders = await db.query(
-          `SELECT f.lender_id, f.amount, l.fname, l.email
-           FROM funding f JOIN lenders l ON l.id = f.lender_id
-           WHERE f.loan_id = $1`, [loanId]
-        );
-        if (loanInfo.rows[0]) {
-          const ln = loanInfo.rows[0];
-          for (const f of allFunders.rows) {
-            resend.emails.send({
-              from: process.env.RESEND_FROM_EMAIL,
-              to: f.email,
-              subject: `${ln.entrepreneur_name} has fully repaid their loan 🎉`,
-              html: emailTemplate(`
-                <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">Full repayment complete! 🎉</h2>
-                <p style="font-size:15px;color:#4B5563;line-height:1.7;margin:0 0 20px">
-                  <strong>${ln.entrepreneur_name}</strong> from ${ln.location} has fully repaid their loan. Your investment made a real difference.
-                </p>
-                <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:24px;text-align:center">
-                  <div style="font-size:13px;color:#065F46;text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px">Your contribution</div>
-                  <div style="font-size:36px;font-weight:700;color:#1A9070;font-family:Georgia,serif">GHS ${parseFloat(f.amount).toFixed(2)}</div>
-                  <div style="font-size:13px;color:#6B7280;margin-top:4px">Fully returned to your vault</div>
-                </div>
-                <p style="font-size:14px;color:#4B5563;line-height:1.7;margin:0 0 20px">
-                  Your principal is back in your Manbi vault. You can reinvest it in another entrepreneur, withdraw it to your mobile money account, or donate it to the next person who needs it.
-                </p>
-                <a href="${process.env.FRONTEND_URL}/manbi-dashboard.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
-                  What would you like to do? →
-                </a>
-              `)
-            });
-          }
-        }
-      } catch (emailErr) {
-        console.error('Fully repaid email error:', emailErr.message);
+    // Send SMS to entrepreneur (non-blocking)
+    try {
+      const loanInfo = await db.query(
+        'SELECT entrepreneur_name, entrepreneur_phone, goal_amount FROM loans WHERE id = $1', [loanId]
+      );
+      const paidSoFar = await db.query(
+        "SELECT COALESCE(SUM(amount),0) as paid_total FROM repayments WHERE loan_id = $1 AND status = 'paid'",
+        [loanId]
+      );
+      if (loanInfo.rows[0] && loanInfo.rows[0].entrepreneur_phone) {
+        const ln = loanInfo.rows[0];
+        const paidTotal = parseFloat(paidSoFar.rows[0].paid_total || 0);
+        const remaining = parseFloat(ln.goal_amount) - paidTotal;
+        const fname = ln.entrepreneur_name.split(' ')[0];
+        const smsMsg = allPaid
+          ? `Hi ${fname}, your Manbi loan is FULLY REPAID! GHS ${parseFloat(ln.goal_amount).toFixed(2)} paid in full. You are now eligible to apply for a new loan. Thank you!`
+          : `Hi ${fname}, your Manbi repayment of GHS ${parseFloat(repayment.amount).toFixed(2)} has been received. Total paid: GHS ${paidTotal.toFixed(2)}. Remaining: GHS ${remaining.toFixed(2)}. Keep it up!`;
+        sendSMS(ln.entrepreneur_phone, smsMsg);
       }
+    } catch (smsErr) {
+      console.error('Repayment SMS error:', smsErr.message);
     }
 
     res.json({
