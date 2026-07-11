@@ -287,6 +287,26 @@ async function confirmFunding(externalRef) {
           </a>
         `)
       });
+
+      // Admin funding notification
+      resend.emails.send({
+        from: process.env.RESEND_FROM_EMAIL,
+        to: 'manbifunds@gmail.com',
+        subject: `💰 New funding: GHS ${parseFloat(funding.amount).toFixed(2)} from ${l.fname}`,
+        html: emailTemplate(`
+          <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">New loan funding received!</h2>
+          <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:20px">
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Lender:</strong> ${l.fname} (${l.email})</div>
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Entrepreneur:</strong> ${ln.entrepreneur_name} · ${ln.location} · ${ln.sector}</div>
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Amount funded:</strong> GHS ${parseFloat(funding.amount).toFixed(2)}</div>
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Platform support:</strong> GHS ${parseFloat(funding.support_amount || 0).toFixed(2)}</div>
+            <div style="font-size:13px;color:#374151"><strong>Payment method:</strong> ${funding.payment_method || 'MoMo'}</div>
+          </div>
+          <a href="${process.env.FRONTEND_URL}/manbi-admin.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
+            View admin panel →
+          </a>
+        `)
+      }).catch(function(e){ console.error('Admin funding notification error:', e.message); });
     }
   } catch (emailErr) {
     console.error('Funding confirmation email error:', emailErr.message);

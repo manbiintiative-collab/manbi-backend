@@ -136,6 +136,24 @@ router.post('/register', registerRules, async (req, res) => {
     // Send welcome email (non-blocking)
     sendWelcomeEmail(lender.fname, lender.email);
 
+    // Admin signup notification
+    resend.emails.send({
+      from: process.env.RESEND_FROM_EMAIL,
+      to: 'manbiinitiative@gmail.com',
+      subject: `👤 New lender signed up: ${lender.fname} ${lender.lname}`,
+      html: emailTemplate(`
+        <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">New lender joined Manbi!</h2>
+        <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:20px">
+          <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Name:</strong> ${lender.fname} ${lender.lname}</div>
+          <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Email:</strong> ${lender.email}</div>
+          <div style="font-size:13px;color:#374151"><strong>MoMo:</strong> ${lender.momo_number || 'Not provided'} (${lender.momo_network || ''})</div>
+        </div>
+        <a href="${process.env.FRONTEND_URL}/manbi-admin.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
+          View in admin panel →
+        </a>
+      `)
+    }).catch(function(e){ console.error('Admin signup notification error:', e.message); });
+
   } catch (err) {
     console.error('Register error:', err.message);
     res.status(500).json({ error: 'Registration failed. Please try again.' });
