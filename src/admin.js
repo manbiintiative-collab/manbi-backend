@@ -39,7 +39,7 @@ router.get('/loans', requireAdmin, async (req, res) => {
         COALESCE(SUM(f.amount), 0) as raised,
         ROUND((COALESCE(SUM(f.amount), 0) / l.goal_amount * 100)::numeric, 0) as pct_funded
        FROM loans l
-       LEFT JOIN funding f ON f.loan_id = l.id
+       LEFT JOIN funding f ON f.loan_id = l.id AND f.status = 'completed'
        GROUP BY l.id
        ORDER BY
          CASE l.status

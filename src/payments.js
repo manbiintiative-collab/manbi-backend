@@ -87,7 +87,7 @@ router.post('/collect', requireAuth, async (req, res) => {
     // Verify loan is active and not overfunded
     const loanResult = await db.query(
       `SELECT l.*, COALESCE(SUM(f.amount), 0) as raised
-       FROM loans l LEFT JOIN funding f ON f.loan_id = l.id
+       FROM loans l LEFT JOIN funding f ON f.loan_id = l.id AND f.status = 'completed'
        WHERE l.id = $1 AND l.status = 'active' AND (l.suspended IS NULL OR l.suspended = FALSE)
        GROUP BY l.id`,
       [loan_id]

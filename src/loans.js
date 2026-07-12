@@ -12,7 +12,7 @@ router.get('/', async (req, res) => {
         COALESCE(SUM(f.amount), 0) as raised,
         ROUND((COALESCE(SUM(f.amount), 0) / l.goal_amount * 100)::numeric, 0) as pct_funded
       FROM loans l
-      LEFT JOIN funding f ON f.loan_id = l.id
+      LEFT JOIN funding f ON f.loan_id = l.id AND f.status = 'completed'
       WHERE l.status = 'active'
     `;
     const params = [];
@@ -46,7 +46,7 @@ router.get('/:id', async (req, res) => {
         ROUND((COALESCE(SUM(f.amount), 0) / l.goal_amount * 100)::numeric, 0) as pct_funded,
         COUNT(DISTINCT f.lender_id) as num_lenders
        FROM loans l
-       LEFT JOIN funding f ON f.loan_id = l.id
+       LEFT JOIN funding f ON f.loan_id = l.id AND f.status = 'completed'
        WHERE l.id = $1
        GROUP BY l.id`,
       [req.params.id]
@@ -72,7 +72,7 @@ router.post('/:id/fund', requireAuth, async (req, res) => {
     // Check loan exists and is active
     const loanResult = await db.query(
       `SELECT l.*, COALESCE(SUM(f.amount), 0) as raised
-       FROM loans l LEFT JOIN funding f ON f.loan_id = l.id
+       FROM loans l LEFT JOIN funding f ON f.loan_id = l.id AND f.status = 'completed'
        WHERE l.id = $1 AND l.status = 'active'
        GROUP BY l.id`,
       [loanId]
@@ -89,17 +89,34 @@ router.post('/:id/fund', requireAuth, async (req, res) => {
 
     // Support fee
     const supportAmount = include_support ? parseFloat((amount * 0.05).toFixed(2)) : 0;
+    const totalDebit = parseFloat(amount) + supportAmount;
 
-    // Record funding
+    if (payment_method === 'vault') {
+      // Vault funding is already-settled money — verify balance and debit it now,
+      // and record the funding as completed immediately (no external confirmation needed).
+      const lenderResult = await db.query('SELECT vault_balance FROM lenders WHERE id = $1', [lenderId]);
+      const vaultBalance = parseFloat(lenderResult.rows[0]?.vault_balance || 0);
+      if (totalDebit > vaultBalance) {
+        return res.status(400).json({ error: `Insufficient vault balance. Available: GHS ${vaultBalance.toFixed(2)}.` });
+      }
+      await db.query('UPDATE lenders SET vault_balance = vault_balance - $1 WHERE id = $2', [totalDebit, lenderId]);
+    }
+
+    // Record funding — vault is settled instantly, MoMo/other methods stay pending until confirmed elsewhere
+    const fundingStatus = payment_method === 'vault' ? 'completed' : 'pending';
     const funding = await db.query(
       `INSERT INTO funding (loan_id, lender_id, amount, support_amount, payment_method, phone_number, status)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending')
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING *`,
-      [loanId, lenderId, amount, supportAmount, payment_method, phone_number]
+      [loanId, lenderId, amount, supportAmount, payment_method, phone_number, fundingStatus]
     );
 
-    // Check if loan is now fully funded
-    const newRaised = parseFloat(loan.raised) + parseFloat(amount);
+    // Only mark the loan funded if the ACTUAL completed total (not pending attempts) reaches goal
+    const completedResult = await db.query(
+      `SELECT COALESCE(SUM(amount), 0) as total FROM funding WHERE loan_id = $1 AND status = 'completed'`,
+      [loanId]
+    );
+    const newRaised = parseFloat(completedResult.rows[0].total);
     if (newRaised >= loan.goal_amount) {
       await db.query("UPDATE loans SET status = 'funded' WHERE id = $1", [loanId]);
     }
@@ -180,8 +197,8 @@ router.get('/my/funded', requireAuth, async (req, res) => {
         MAX(f.created_at) as funded_at
        FROM funding f
        JOIN loans l ON l.id = f.loan_id
-       LEFT JOIN funding f2 ON f2.loan_id = l.id
-       WHERE f.lender_id = $1
+       LEFT JOIN funding f2 ON f2.loan_id = l.id AND f2.status = 'completed'
+       WHERE f.lender_id = $1 AND f.status = 'completed'
        GROUP BY l.id
        ORDER BY MAX(f.created_at) DESC`,
       [req.user.id]
