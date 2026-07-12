@@ -270,10 +270,13 @@ async function confirmFunding(externalRef) {
     const lenderResult = await db.query(
       'SELECT fname, email FROM lenders WHERE id = $1', [funding.lender_id]
     );
-    const loanInfo = await db.query(
-      'SELECT entrepreneur_name, location, sector, goal_amount FROM loans WHERE id = $1',
-      [funding.loan_id]
-    );
+    const loanInfo = funding.loan_id
+      ? await db.query(
+          'SELECT entrepreneur_name, location, sector, goal_amount FROM loans WHERE id = $1',
+          [funding.loan_id]
+        )
+      : { rows: [] };
+
     if (lenderResult.rows[0] && loanInfo.rows[0]) {
       const l = lenderResult.rows[0];
       const ln = loanInfo.rows[0];
@@ -311,6 +314,23 @@ async function confirmFunding(externalRef) {
           </a>
         `)
       }).catch(function(e){ console.error('Admin funding notification error:', e.message); });
+    } else if (lenderResult.rows[0] && !funding.loan_id) {
+      // No loan attached — this was an authenticated MoMo donation, not loan funding.
+      // (Previously this branch was silently skipped, so admin was never notified.)
+      const l = lenderResult.rows[0];
+      resend.emails.send({
+        from: process.env.RESEND_FROM_EMAIL,
+        to: 'manbifunds@gmail.com',
+        subject: `💛 New donation: GHS ${parseFloat(funding.amount).toFixed(2)} from ${l.fname}`,
+        html: emailTemplate(`
+          <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">New donation received!</h2>
+          <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:20px">
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Lender:</strong> ${l.fname} (${l.email})</div>
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Amount:</strong> GHS ${parseFloat(funding.amount).toFixed(2)}</div>
+            <div style="font-size:13px;color:#374151"><strong>Payment method:</strong> ${funding.payment_method || 'MoMo'}</div>
+          </div>
+        `)
+      }).catch(function(e){ console.error('Admin donation notification error:', e.message); });
     }
   } catch (emailErr) {
     console.error('Funding confirmation email error:', emailErr.message);
@@ -416,6 +436,26 @@ router.post('/disburse/:loan_id', requireAdmin, async (req, res) => {
     const firstRepayDate = schedule.find(function(s) { return s.amount > 0; });
     const smsMsg = `Hi ${loan.entrepreneur_name.split(' ')[0]}, GHS ${loan.goal_amount} has been sent to your MoMo from Manbi. Repay GHS ${installmentAmt ? installmentAmt.amount.toFixed(2) : '-'}/month starting ${firstRepayDate ? firstRepayDate.due_date : '-'}. Send repayments to your Manbi agent. Thank you!`;
     sendSMS(phone_number, smsMsg);
+
+    // Admin notification
+    try {
+      const { emailTemplate, resend } = require('./auth');
+      resend.emails.send({
+        from: process.env.RESEND_FROM_EMAIL,
+        to: 'manbifunds@gmail.com',
+        subject: `💸 Disbursed: GHS ${loan.goal_amount} to ${loan.entrepreneur_name}`,
+        html: emailTemplate(`
+          <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">Loan disbursement completed</h2>
+          <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:12px;padding:20px;margin-bottom:20px">
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Entrepreneur:</strong> ${loan.entrepreneur_name} · ${loan.location} · ${loan.sector}</div>
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Amount:</strong> GHS ${loan.goal_amount}</div>
+            <div style="font-size:13px;color:#374151"><strong>Sent to:</strong> ${phone_number} (${network})</div>
+          </div>
+        `)
+      }).catch(function(e){ console.error('Admin disbursement notification error:', e.message); });
+    } catch (emailErr) {
+      console.error('Disbursement email error:', emailErr.message);
+    }
 
     res.json({
       message: `GHS ${loan.goal_amount} disbursed to ${phone_number} successfully.`,
@@ -765,8 +805,29 @@ router.post('/topup/status', requireAuth, async (req, res) => {
 
         // Get updated vault balance
         const lenderResult = await db.query(
-          'SELECT vault_balance FROM lenders WHERE id = $1', [lender_id]
+          'SELECT vault_balance, fname, email FROM lenders WHERE id = $1', [lender_id]
         );
+
+        // Admin notification
+        try {
+          const { emailTemplate, resend } = require('./auth');
+          const l = lenderResult.rows[0];
+          resend.emails.send({
+            from: process.env.RESEND_FROM_EMAIL,
+            to: 'manbifunds@gmail.com',
+            subject: `🏦 Vault top-up: GHS ${amount.toFixed(2)} from ${l ? l.fname : 'a lender'}`,
+            html: emailTemplate(`
+              <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">Vault top-up completed!</h2>
+              <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:20px">
+                <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Lender:</strong> ${l ? l.fname + ' (' + l.email + ')' : lender_id}</div>
+                <div style="font-size:13px;color:#374151"><strong>Amount:</strong> GHS ${amount.toFixed(2)}</div>
+              </div>
+            `)
+          }).catch(function(e){ console.error('Admin topup notification error:', e.message); });
+        } catch (emailErr) {
+          console.error('Topup email error:', emailErr.message);
+        }
+
         return res.json({
           status: 'confirmed',
           message: 'Vault topped up successfully.',
@@ -799,7 +860,7 @@ router.post('/donate', requireAuth, async (req, res) => {
   try {
     if (source === 'vault') {
       // Deduct from vault
-      const lenderResult = await db.query('SELECT vault_balance FROM lenders WHERE id = $1', [lender_id]);
+      const lenderResult = await db.query('SELECT vault_balance, fname, email FROM lenders WHERE id = $1', [lender_id]);
       const vaultBalance = parseFloat(lenderResult.rows[0]?.vault_balance || 0);
       if (amount > vaultBalance) return res.status(400).json({ error: `Insufficient vault balance. Available: GHS ${vaultBalance.toFixed(2)}.` });
       await db.query('UPDATE lenders SET vault_balance = vault_balance - $1 WHERE id = $2', [amount, lender_id]);
@@ -807,6 +868,28 @@ router.post('/donate', requireAuth, async (req, res) => {
         `INSERT INTO transactions (lender_id, type, amount, payment_method, status) VALUES ($1, 'donation', $2, 'vault', 'completed')`,
         [lender_id, amount]
       );
+
+      // Admin notification (vault donations complete instantly, so this can't go through confirmFunding)
+      try {
+        const { emailTemplate, resend } = require('./auth');
+        const l = lenderResult.rows[0];
+        resend.emails.send({
+          from: process.env.RESEND_FROM_EMAIL,
+          to: 'manbifunds@gmail.com',
+          subject: `💛 New donation: GHS ${amount.toFixed(2)} from ${l.fname}`,
+          html: emailTemplate(`
+            <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">New donation received!</h2>
+            <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:20px">
+              <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Lender:</strong> ${l.fname} (${l.email})</div>
+              <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Amount:</strong> GHS ${amount.toFixed(2)}</div>
+              <div style="font-size:13px;color:#374151"><strong>Payment method:</strong> Vault balance</div>
+            </div>
+          `)
+        }).catch(function(e){ console.error('Admin donation notification error:', e.message); });
+      } catch (emailErr) {
+        console.error('Vault donation email error:', emailErr.message);
+      }
+
       return res.json({ message: 'Donation successful. Thank you!', new_balance: vaultBalance - amount });
     }
 
@@ -1176,6 +1259,28 @@ router.post('/withdraw', requireAuth, async (req, res) => {
        VALUES ($1, 'withdrawal', $2, $3, $4, 'completed', $5)`,
       [lender_id, amount, network, phone_number, externalRef]
     );
+
+    // Admin notification
+    try {
+      const { emailTemplate, resend } = require('./auth');
+      const lenderInfoResult = await db.query('SELECT fname, email FROM lenders WHERE id = $1', [lender_id]);
+      const l = lenderInfoResult.rows[0];
+      resend.emails.send({
+        from: process.env.RESEND_FROM_EMAIL,
+        to: 'manbifunds@gmail.com',
+        subject: `💸 Withdrawal: GHS ${amount} to ${l ? l.fname : 'a lender'}`,
+        html: emailTemplate(`
+          <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">Vault withdrawal completed</h2>
+          <div style="background:#FEF2F2;border:1px solid #FECACA;border-radius:12px;padding:20px;margin-bottom:20px">
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Lender:</strong> ${l ? l.fname + ' (' + l.email + ')' : lender_id}</div>
+            <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Amount:</strong> GHS ${amount}</div>
+            <div style="font-size:13px;color:#374151"><strong>Sent to:</strong> ${phone_number} (${network})</div>
+          </div>
+        `)
+      }).catch(function(e){ console.error('Admin withdrawal notification error:', e.message); });
+    } catch (emailErr) {
+      console.error('Withdrawal email error:', emailErr.message);
+    }
 
     res.json({
       message: `GHS ${amount} sent to ${phone_number} successfully.`,
