@@ -143,7 +143,7 @@ router.get('/loans/:id/funders', async (req, res) => {
         l.profile_photo_url
        FROM funding f
        JOIN lenders l ON f.lender_id = l.id
-       WHERE f.loan_id = $1
+       WHERE f.loan_id = $1 AND f.status = 'completed'
        ORDER BY f.created_at ASC`,
       [req.params.id]
     );
