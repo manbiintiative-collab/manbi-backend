@@ -63,12 +63,12 @@ router.post('/loans', requireAdmin, async (req, res) => {
   const {
     entrepreneur_name, initials, location, sector,
     purpose, goal_amount, loan_term_months, repayment_plan,
-    narrative, profile_photo_url, video_url,
+    narrative, profile_photo_url, id_card_url, video_url,
     partner_name, partner_description, partner_logo_url, partner_contact,
     featured, repayment_track, entrepreneur_phone, entrepreneur_network
   } = req.body;
 
-  if (!entrepreneur_name || !location || !sector || !purpose || !goal_amount) {
+  if (!entrepreneur_name || !location || !sector || !purpose || !goal_amount || !id_card_url) {
     return res.status(400).json({ error: 'Please fill in all required fields.' });
   }
 
@@ -82,16 +82,16 @@ router.post('/loans', requireAdmin, async (req, res) => {
       `INSERT INTO loans (
         entrepreneur_name, initials, location, sector,
         purpose, goal_amount, loan_term_months, repayment_plan,
-        narrative, profile_photo_url, video_url,
+        narrative, profile_photo_url, id_card_url, video_url,
         partner_name, partner_description, partner_logo_url, partner_contact,
         featured, repayment_track, entrepreneur_phone, entrepreneur_network, status
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,'active')
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,'active')
       RETURNING *`,
       [
         entrepreneur_name, initials || entrepreneur_name.substring(0,2).toUpperCase(),
         location, sector, purpose, goal_amount,
         loan_term_months || 6, repayment_plan, narrative,
-        profile_photo_url, video_url,
+        profile_photo_url, id_card_url, video_url,
         partner_name || null, partner_description || null,
         partner_logo_url || null, partner_contact || null,
         featured || false, repayment_track || 'standard',
@@ -99,6 +99,36 @@ router.post('/loans', requireAdmin, async (req, res) => {
       ]
     );
     res.status(201).json(result.rows[0]);
+
+    // Notify all lenders about the new listing (non-blocking, fire after response)
+    try {
+      const lendersResult = await db.query(
+        `SELECT fname, email FROM lenders WHERE suspended IS NOT TRUE AND email IS NOT NULL`
+      );
+      const loan = result.rows[0];
+      for (const lender of lendersResult.rows) {
+        resend.emails.send({
+          from: process.env.RESEND_FROM_EMAIL,
+          to: lender.email,
+          subject: `New entrepreneur on Manbi: ${loan.entrepreneur_name} 🌱`,
+          html: emailTemplate(`
+            <h2 style="font-size:22px;color:#0F1C17;margin:0 0 8px;font-family:Georgia,serif">A new entrepreneur needs your support, ${lender.fname}</h2>
+            <p style="font-size:15px;color:#4B5563;line-height:1.7;margin:0 0 20px">
+              <strong>${loan.entrepreneur_name}</strong> in ${loan.location} is now live on Manbi, seeking <strong>GHS ${parseFloat(loan.goal_amount).toLocaleString()}</strong> for ${loan.sector.toLowerCase()}.
+            </p>
+            <div style="background:#F0FDF4;border:1px solid #D1FAE5;border-radius:12px;padding:20px;margin-bottom:24px">
+              <div style="font-size:13px;color:#374151;margin-bottom:8px"><strong>Purpose:</strong> ${loan.purpose}</div>
+              <div style="font-size:13px;color:#374151"><strong>Goal:</strong> GHS ${parseFloat(loan.goal_amount).toLocaleString()}</div>
+            </div>
+            <a href="${process.env.FRONTEND_URL}/manbi.html" style="display:inline-block;background:#1A9070;color:#fff;text-decoration:none;padding:14px 28px;border-radius:50px;font-size:15px;font-weight:500">
+              View listing →
+            </a>
+          `)
+        });
+      }
+    } catch (emailErr) {
+      console.error('New listing notification email error:', emailErr.message);
+    }
   } catch (err) {
     console.error('Create loan error:', err);
     res.status(500).json({ error: 'Failed to create loan.' });
